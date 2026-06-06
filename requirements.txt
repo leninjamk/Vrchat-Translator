@@ -4,3 +4,6 @@ requests
 python-osc
 gtts
 pydub
+sounddevice
+soundfile
+deep_translator
