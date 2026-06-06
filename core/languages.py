@@ -1,0 +1,20 @@
+LANGS = {
+    "Auto Detect": "auto",
+    "Português (BR)": "pt",
+    "Inglês (US)": "en",
+    "Espanhol": "es",
+    "Francês": "fr",
+    "Alemão": "de",
+    "Italiano": "it",
+    "Japonês": "ja",
+    "Coreano": "ko",
+    "Chinês (Simplificado)": "zh",
+    "Chinês (Tradicional)": "zh-TW",
+    "Russo": "ru",
+    "Árabe": "ar",
+    "Hindi": "hi",
+    "Turco": "tr",
+    "Holandês": "nl",
+    "Polonês": "pl",
+    "Sueco": "sv"
+}

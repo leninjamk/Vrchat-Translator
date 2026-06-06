@@ -1,0 +1,6 @@
+speechrecognition
+pyaudio
+requests
+python-osc
+gtts
+pydub
