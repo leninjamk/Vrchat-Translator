@@ -2,7 +2,7 @@ speechrecognition
 pyaudio
 requests
 python-osc
-gtts
+edge-tts
 pydub
 sounddevice
 soundfile

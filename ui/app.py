@@ -32,6 +32,8 @@ class App:
 
         self.mic = ttk.Combobox(root, width=80)  # 🔥 maior
         self.mic["values"] = [f"{i} - {n}" for i, n in self.inputs]
+        if self.inputs:
+            self.mic.current(0)
         self.mic.pack(pady=5)
 
         # 🔊 OUTPUT
@@ -45,6 +47,8 @@ class App:
 
         self.out = ttk.Combobox(root, width=80)
         self.out["values"] = [f"{i} - {n}" for i, n in self.outputs]
+        if self.outputs:
+            self.out.current(0)
         self.out.pack(pady=5)
 
         # 🌍 FROM LANG
