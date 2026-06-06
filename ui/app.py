@@ -169,11 +169,25 @@ class App:
                                    bg="#1F1F1F", fg="#888888", font=("Segoe UI", 9),
                                    activebackground="#252525", activeforeground="#CCCCCC",
                                    bd=0, relief="flat", height=1, cursor="hand2")
-        self.btn_clear.pack(padx=30, fill="x", pady=(0, 10))
+        self.btn_clear.pack(padx=30, fill="x", pady=(0, 6))
+
+        # 🔔 CHECKBOX BEEP
+        self.beep_var = tk.BooleanVar(value=settings.get("beep", True))
+        beep_frame = tk.Frame(root, bg="#181818")
+        beep_frame.pack(padx=30, fill="x", pady=(0, 6))
+        self.beep_check = tk.Checkbutton(
+            beep_frame, text="✔ Som de aviso ao reconhecer fala",
+            variable=self.beep_var,
+            bg="#181818", fg="#888888",
+            activebackground="#181818", activeforeground="#CCCCCC",
+            selectcolor="#252525",
+            font=("Segoe UI", 9), anchor="w", cursor="hand2"
+        )
+        self.beep_check.pack(side="left")
 
         # 📝 BARRA DE STATUS
         self.status = tk.Label(root, text="Parado", font=("Segoe UI", 9), bg="#181818", fg="#666666")
-        self.status.pack(pady=10)
+        self.status.pack(pady=8)
 
     def toggle_service(self):
         if not self.running:
@@ -202,7 +216,8 @@ class App:
                 "out": out_name,
                 "from_lang": self.from_lang.get(),
                 "to_lang": self.to_lang.get(),
-                "pitch": self.pitch_scale.get()
+                "pitch": self.pitch_scale.get(),
+                "beep": self.beep_var.get()
             })
 
             self.status.config(text="Escutando...", fg="#4C8BF5")
@@ -232,6 +247,7 @@ class App:
         from core.translate import translate
         from core.tts import speak
         from core.osc import send_chat
+        from core.beep import beep_start, beep_done
 
         adjust_noise(self.mic_index)
 
@@ -240,6 +256,10 @@ class App:
                 current_from = LANGS[self.from_lang.get()]
             except KeyError:
                 current_from = "pt"
+
+            # Beep de início: sinaliza que está escutando
+            if self.beep_var.get():
+                threading.Thread(target=beep_start, daemon=True).start()
 
             text = listen(self.mic_index, current_from)
 
@@ -254,6 +274,10 @@ class App:
 
                 # Lê o pitch em tempo real da interface
                 current_pitch = self.pitch_scale.get()
+
+                # Beep de conclusão ao reconhecer a fala
+                if self.beep_var.get():
+                    threading.Thread(target=beep_done, daemon=True).start()
 
                 translated = translate(text, current_to)
 
