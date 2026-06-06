@@ -1,10 +1,11 @@
-from core.speech_to_text import listen
+from core.speech_to_text import listen, adjust_noise
 from core.translate import translate
 from core.tts import speak
 from core.osc import send_chat
 
 def start_system(mic_index=None):
     print("🚀 rodando sistema...")
+    adjust_noise(mic_index)
 
     while True:
         text = listen(mic_index)

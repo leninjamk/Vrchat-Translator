@@ -68,45 +68,69 @@ class App:
         self.voice_label.pack()
 
         # ▶ START
-        tk.Button(root, text="START", command=self.start, height=2).pack(pady=15)
+        self.btn_start = tk.Button(root, text="START", command=self.toggle_service, height=2, width=15)
+        self.btn_start.pack(pady=15)
 
         self.status = tk.Label(root, text="Parado", font=("Arial", 12))
         self.status.pack()
 
-    def start(self):
-        mic_index = int(self.mic.get().split(" - ")[0])
-        out_index = int(self.out.get().split(" - ")[0])
+    def toggle_service(self):
+        if not self.running:
+            try:
+                mic_index = int(self.mic.get().split(" - ")[0])
+                out_index = int(self.out.get().split(" - ")[0])
+            except (IndexError, ValueError, AttributeError):
+                self.status.config(text="Erro: Selecione microfone e saída!")
+                return
 
-        engine.set_output_index(out_index)
+            engine.set_output_index(out_index)
+            self.mic_index = mic_index
 
-        self.mic_index = mic_index
-
-        self.lang_from = LANGS[self.from_lang.get()]
-        self.lang_to = LANGS[self.to_lang.get()]
-
-        self.status.config(text="Rodando...")
-        self.running = True
-
-        threading.Thread(target=self.run_engine, daemon=True).start()
+            self.status.config(text="Rodando...")
+            self.btn_start.config(text="STOP", bg="#ff4d4d", fg="white")
+            self.mic.config(state="disabled")
+            self.out.config(state="disabled")
+            
+            self.running = True
+            threading.Thread(target=self.run_engine, daemon=True).start()
+        else:
+            self.running = False
+            self.status.config(text="Parado")
+            self.btn_start.config(text="START", bg="SystemButtonFace", fg="black")
+            self.mic.config(state="normal")
+            self.out.config(state="normal")
 
     def run_engine(self):
-        from core.speech_to_text import listen
+        from core.speech_to_text import listen, adjust_noise
         from core.translate import translate
         from core.tts import speak
         from core.osc import send_chat
 
+        adjust_noise(self.mic_index)
+
         while self.running:
-            text = listen(self.mic_index, self.lang_from)
+            # Obtém os idiomas dinamicamente a cada loop para responder às alterações na UI
+            try:
+                current_from = LANGS[self.from_lang.get()]
+                current_to = LANGS[self.to_lang.get()]
+            except KeyError:
+                current_from = "pt"
+                current_to = "en"
+
+            text = listen(self.mic_index, current_from)
+
+            if not self.running:
+                break
 
             if text:
-                translated = translate(text, self.lang_to)
+                translated = translate(text, current_to)
 
                 print("Você:", text)
                 print("Traduzido:", translated)
 
                 send_chat(f"({text}) → {translated}")
 
-                speak(translated, self.lang_to)
+                speak(translated, current_to)
 
 
 if __name__ == "__main__":

@@ -7,11 +7,19 @@ r.energy_threshold = 300
 r.pause_threshold = 0.8
 
 
+def adjust_noise(mic_index):
+    try:
+        with sr.Microphone(device_index=mic_index) as source:
+            print("🔊 Calibrando ruído ambiente...")
+            r.adjust_for_ambient_noise(source, duration=0.8)
+            print(f"✔️ Calibração concluída! Limiar: {r.energy_threshold}")
+    except Exception as e:
+        print("❌ Erro ao calibrar ruído:", e)
+
+
 def listen(mic_index, language="pt-BR"):
     try:
         with sr.Microphone(device_index=mic_index) as source:
-            r.adjust_for_ambient_noise(source, duration=0.5)
-
             audio = r.listen(source, phrase_time_limit=8)
 
         try:
