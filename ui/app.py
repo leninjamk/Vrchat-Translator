@@ -257,10 +257,6 @@ class App:
             except KeyError:
                 current_from = "pt"
 
-            # Beep de início: sinaliza que está escutando
-            if self.beep_var.get():
-                threading.Thread(target=beep_start, daemon=True).start()
-
             text = listen(self.mic_index, current_from)
 
             if not self.running:
@@ -275,18 +271,29 @@ class App:
                 # Lê o pitch em tempo real da interface
                 current_pitch = self.pitch_scale.get()
 
-                # Beep de conclusão ao reconhecer a fala
+                # Beep de aviso: toca ao detectar fala (beep_start) e ao finalizar (beep_done)
                 if self.beep_var.get():
+                    threading.Thread(target=beep_start, daemon=True).start()
                     threading.Thread(target=beep_done, daemon=True).start()
 
-                translated = translate(text, current_to)
+                # Se o idioma de origem e destino forem iguais, não traduz
+                lang_from_code = current_from if current_from != "auto" else None
+                same_lang = (lang_from_code == current_to)
 
-                print("Você:", text)
-                print("Traduzido:", translated)
+                if same_lang:
+                    # Mesmo idioma: apenas fala o texto original sem tradução
+                    print("Você:", text)
+                    print("(Sem tradução - mesmo idioma)")
+                    send_chat(text)
+                    speak(text, current_to, current_pitch)
+                else:
+                    translated = translate(text, current_to)
 
-                send_chat(f"({text}) → {translated}")
+                    print("Você:", text)
+                    print("Traduzido:", translated)
 
-                speak(translated, current_to, current_pitch)
+                    send_chat(f"({text}) → {translated}")
+                    speak(translated, current_to, current_pitch)
 
 
 if __name__ == "__main__":
