@@ -3,12 +3,31 @@ from tkinter import ttk
 import threading
 import sounddevice as sd
 import sys, os
+import json
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from core.singleton import engine
 from core.languages import LANGS
 from core.voices import VOICES
+
+SETTINGS_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "settings.json")
+
+def load_settings():
+    if os.path.exists(SETTINGS_FILE):
+        try:
+            with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {}
+
+def save_settings(settings):
+    try:
+        with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
+            json.dump(settings, f, indent=4, ensure_ascii=False)
+    except Exception:
+        pass
 
 
 class App:
@@ -20,6 +39,7 @@ class App:
         self.running = False
 
         devices = sd.query_devices()
+        settings = load_settings()
 
         # 🎤 MIC (MAIOR + VISÍVEL)
         tk.Label(root, text="Microfone", font=("Arial", 12, "bold")).pack()
@@ -32,8 +52,16 @@ class App:
 
         self.mic = ttk.Combobox(root, width=80)  # 🔥 maior
         self.mic["values"] = [f"{i} - {n}" for i, n in self.inputs]
+        
+        # Selecionar mic salvo ou primeiro disponível
+        default_mic_idx = 0
+        if "mic" in settings:
+            for idx, (_, name) in enumerate(self.inputs):
+                if name == settings["mic"]:
+                    default_mic_idx = idx
+                    break
         if self.inputs:
-            self.mic.current(0)
+            self.mic.current(default_mic_idx)
         self.mic.pack(pady=5)
 
         # 🔊 OUTPUT
@@ -47,22 +75,40 @@ class App:
 
         self.out = ttk.Combobox(root, width=80)
         self.out["values"] = [f"{i} - {n}" for i, n in self.outputs]
+        
+        # Selecionar saída salva ou primeira disponível
+        default_out_idx = 0
+        if "out" in settings:
+            for idx, (_, name) in enumerate(self.outputs):
+                if name == settings["out"]:
+                    default_out_idx = idx
+                    break
         if self.outputs:
-            self.out.current(0)
+            self.out.current(default_out_idx)
         self.out.pack(pady=5)
 
         # 🌍 FROM LANG
         tk.Label(root, text="Idioma origem").pack()
 
-        self.from_lang = ttk.Combobox(root, values=list(LANGS.keys()), width=40)
-        self.from_lang.current(1)
+        from_langs_list = list(LANGS.keys())
+        self.from_lang = ttk.Combobox(root, values=from_langs_list, width=40)
+        
+        default_from_idx = 1 # padrão Português (BR)
+        if "from_lang" in settings and settings["from_lang"] in from_langs_list:
+            default_from_idx = from_langs_list.index(settings["from_lang"])
+        self.from_lang.current(default_from_idx)
         self.from_lang.pack()
 
         # 🌍 TO LANG
         tk.Label(root, text="Idioma destino").pack()
 
-        self.to_lang = ttk.Combobox(root, values=list(LANGS.keys()), width=40)
-        self.to_lang.current(0)
+        to_langs_list = [k for k in LANGS.keys() if k != "Auto Detect"]
+        self.to_lang = ttk.Combobox(root, values=to_langs_list, width=40)
+        
+        default_to_idx = 0 # padrão Inglês (US)
+        if "to_lang" in settings and settings["to_lang"] in to_langs_list:
+            default_to_idx = to_langs_list.index(settings["to_lang"])
+        self.to_lang.current(default_to_idx)
         self.to_lang.pack()
 
         # 🎙 VOZ
@@ -90,6 +136,24 @@ class App:
             engine.set_output_index(out_index)
             self.mic_index = mic_index
 
+            # Salvar as últimas configurações selecionadas
+            try:
+                mic_name = self.mic.get().split(" - ", 1)[1]
+            except IndexError:
+                mic_name = self.mic.get()
+                
+            try:
+                out_name = self.out.get().split(" - ", 1)[1]
+            except IndexError:
+                out_name = self.out.get()
+
+            save_settings({
+                "mic": mic_name,
+                "out": out_name,
+                "from_lang": self.from_lang.get(),
+                "to_lang": self.to_lang.get()
+            })
+
             self.status.config(text="Rodando...")
             self.btn_start.config(text="STOP", bg="#ff4d4d", fg="white")
             self.mic.config(state="disabled")
@@ -113,13 +177,10 @@ class App:
         adjust_noise(self.mic_index)
 
         while self.running:
-            # Obtém os idiomas dinamicamente a cada loop para responder às alterações na UI
             try:
                 current_from = LANGS[self.from_lang.get()]
-                current_to = LANGS[self.to_lang.get()]
             except KeyError:
                 current_from = "pt"
-                current_to = "en"
 
             text = listen(self.mic_index, current_from)
 
@@ -127,6 +188,11 @@ class App:
                 break
 
             if text:
+                try:
+                    current_to = LANGS[self.to_lang.get()]
+                except KeyError:
+                    current_to = "en"
+
                 translated = translate(text, current_to)
 
                 print("Você:", text)
