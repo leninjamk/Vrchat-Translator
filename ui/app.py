@@ -33,7 +33,7 @@ def save_settings(settings):
 class App:
     def __init__(self, root):
         self.root = root
-        self.root.title("VRChat Speech Assistant")
+        self.root.title("Translator By: LeNinjaMK")
         self.root.geometry("420x750")
         self.root.resizable(False, False)
         self.root.configure(bg="#181818")
@@ -66,8 +66,8 @@ class App:
         title_frame = tk.Frame(root, bg="#181818")
         title_frame.pack(pady=(20, 5))
         
-        tk.Label(title_frame, text="VRChat Speech", font=("Segoe UI", 20, "bold"), bg="#181818", fg="#FFFFFF").pack()
-        tk.Label(title_frame, text="TRANSLATOR MAX PRO", font=("Segoe UI", 10, "bold"), bg="#181818", fg="#4C8BF5").pack()
+        tk.Label(title_frame, text="VRChat Speech", font=("Segoe UI", 22, "bold"), bg="#181818", fg="#FFFFFF").pack()
+        tk.Label(title_frame, text="By: LeNinjaMK", font=("Segoe UI", 10, "bold"), bg="#181818", fg="#4C8BF5").pack()
 
         # Dica / Instrução
         tk.Label(root, text="Fale claramente e evite fontes de ruído de fundo.", 

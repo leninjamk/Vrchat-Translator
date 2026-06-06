@@ -4,8 +4,8 @@ setlocal enabledelayedexpansion
 cd /d "%~dp0"
 
 echo ===================================================
-2.0.1  -  VRChat Translator MAX PRO
-===================================================
+echo             Translator By: LeNinjaMK
+echo ===================================================
 echo.
 
 :: 1. Verificar se o Python está instalado
