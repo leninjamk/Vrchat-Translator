@@ -129,7 +129,7 @@ class App:
                                     bg="#181818", fg="#FFFFFF", highlightthickness=0,
                                     troughcolor="#252525", activebackground="#4C8BF5",
                                     showvalue=True, bd=0)
-        self.pitch_scale.set(settings.get("pitch", 0))
+        self.pitch_scale.set(0)
         self.pitch_scale.pack(side="left", fill="x", expand=True, padx=8)
         
         tk.Label(slider_frame, text="Agudo", bg="#181818", fg="#777777", font=("Segoe UI", 8, "bold")).pack(side="right")
@@ -216,7 +216,6 @@ class App:
                 "out": out_name,
                 "from_lang": self.from_lang.get(),
                 "to_lang": self.to_lang.get(),
-                "pitch": self.pitch_scale.get(),
                 "beep": self.beep_var.get()
             })
 
@@ -229,10 +228,17 @@ class App:
             threading.Thread(target=self.run_engine, daemon=True).start()
         else:
             self.running = False
-            self.status.config(text="Parado", fg="#666666")
-            self.btn_start.config(text="START LISTENING", bg="#252525")
-            self.mic.config(state="normal")
-            self.out.config(state="normal")
+            self.status.config(text="Parando serviço...", fg="#FFA500")
+            self.btn_start.config(state="disabled", text="Aguarde...", bg="#333333")
+            
+            # Reativa os controles após 1.5s (tempo para o timeout do listen liberar o mic)
+            def reenable():
+                self.btn_start.config(state="normal", text="START LISTENING", bg="#252525")
+                self.status.config(text="Parado", fg="#666666")
+                self.mic.config(state="normal")
+                self.out.config(state="normal")
+            
+            root.after(1500, reenable)
 
     def clear_chatbox(self):
         try:
