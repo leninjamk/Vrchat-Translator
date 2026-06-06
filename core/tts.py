@@ -33,12 +33,14 @@ def _clean_text(text: str) -> str:
     return text
 
 
-async def _generate(text: str, voice: str, path: str) -> None:
-    communicate = edge_tts.Communicate(text=text, voice=voice)
+async def _generate(text: str, voice: str, path: str, pitch: int = 0) -> None:
+    # O pitch é recebido como inteiro (-50 a 50). Formatamos no padrão do edge-tts, ex: "+10Hz" ou "-15Hz".
+    pitch_str = f"{pitch:+}Hz"
+    communicate = edge_tts.Communicate(text=text, voice=voice, pitch=pitch_str)
     await communicate.save(path)
 
 
-def speak(text, lang="en", pitch=1.0):
+def speak(text, lang="en", pitch=0):
     text = _clean_text(text)
     if not text:
         print("❌ TTS vazio ignorado")
@@ -53,7 +55,7 @@ def speak(text, lang="en", pitch=1.0):
             fd, tmp_path = tempfile.mkstemp(suffix=".mp3")
             os.close(fd)
 
-            asyncio.run(_generate(text, voice, tmp_path))
+            asyncio.run(_generate(text, voice, tmp_path, pitch))
 
             if not os.path.exists(tmp_path) or os.path.getsize(tmp_path) < 1000:
                 print("❌ TTS error: audio vazio")

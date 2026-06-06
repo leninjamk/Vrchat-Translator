@@ -33,27 +33,59 @@ def save_settings(settings):
 class App:
     def __init__(self, root):
         self.root = root
-        self.root.title("VRChat Translator MAX PRO")
-        self.root.geometry("900x650")  # 🔥 maior
+        self.root.title("VRChat Speech Assistant")
+        self.root.geometry("420x750")
+        self.root.resizable(False, False)
+        self.root.configure(bg="#181818")
 
         self.running = False
 
         devices = sd.query_devices()
         settings = load_settings()
 
-        # 🎤 MIC (MAIOR + VISÍVEL)
-        tk.Label(root, text="Microfone", font=("Arial", 12, "bold")).pack()
+        # Estilo dos Comboboxes (Dark Theme)
+        style = ttk.Style()
+        style.theme_use('clam')
+        style.configure("TCombobox", 
+                        fieldbackground="#252525", 
+                        background="#252525", 
+                        foreground="#FFFFFF",
+                        bordercolor="#333333",
+                        darkcolor="#252525",
+                        lightcolor="#252525",
+                        arrowcolor="#FFFFFF")
+        
+        # Cores dropdown listbox do combobox
+        root.option_add("*TCombobox*Listbox.background", "#252525")
+        root.option_add("*TCombobox*Listbox.foreground", "#FFFFFF")
+        root.option_add("*TCombobox*Listbox.selectBackground", "#4C8BF5")
+        root.option_add("*TCombobox*Listbox.selectForeground", "#FFFFFF")
+        root.option_add("*TCombobox*Listbox.borderWidth", "0")
 
+        # Banner do Título
+        title_frame = tk.Frame(root, bg="#181818")
+        title_frame.pack(pady=(20, 5))
+        
+        tk.Label(title_frame, text="VRChat Speech", font=("Segoe UI", 20, "bold"), bg="#181818", fg="#FFFFFF").pack()
+        tk.Label(title_frame, text="TRANSLATOR MAX PRO", font=("Segoe UI", 10, "bold"), bg="#181818", fg="#4C8BF5").pack()
+
+        # Dica / Instrução
+        tk.Label(root, text="Fale claramente e evite fontes de ruído de fundo.", 
+                 font=("Segoe UI", 9, "italic"), bg="#181818", fg="#888888").pack(pady=(0, 15))
+
+        # Configurações de opções de fonte comum
+        lbl_opts = {"bg": "#181818", "fg": "#CCCCCC", "font": ("Segoe UI", 9, "bold")}
+
+        # 🎤 MICROFONE (INPUT)
+        tk.Label(root, text="Dispositivo de entrada (Microfone):", **lbl_opts).pack(anchor="w", padx=30, pady=(5, 2))
         self.inputs = [
             (i, d["name"])
             for i, d in enumerate(devices)
             if d["max_input_channels"] > 0
         ]
-
-        self.mic = ttk.Combobox(root, width=80)  # 🔥 maior
+        self.mic = ttk.Combobox(root, width=45)
         self.mic["values"] = [f"{i} - {n}" for i, n in self.inputs]
         
-        # Selecionar mic salvo ou primeiro disponível
         default_mic_idx = 0
         if "mic" in settings:
             for idx, (_, name) in enumerate(self.inputs):
@@ -62,21 +94,56 @@ class App:
                     break
         if self.inputs:
             self.mic.current(default_mic_idx)
-        self.mic.pack(pady=5)
+        self.mic.pack(padx=30, fill="x")
 
-        # 🔊 OUTPUT
-        tk.Label(root, text="Saída (VB-Cable)", font=("Arial", 12, "bold")).pack()
+        # 🌍 IDIOMA ORIGEM
+        tk.Label(root, text="Idioma de origem:", **lbl_opts).pack(anchor="w", padx=30, pady=(12, 2))
+        from_langs_list = list(LANGS.keys())
+        self.from_lang = ttk.Combobox(root, width=45, values=from_langs_list)
+        
+        default_from_idx = 1
+        if "from_lang" in settings and settings["from_lang"] in from_langs_list:
+            default_from_idx = from_langs_list.index(settings["from_lang"])
+        self.from_lang.current(default_from_idx)
+        self.from_lang.pack(padx=30, fill="x")
 
+        # 🌍 IDIOMA DESTINO
+        tk.Label(root, text="Idioma de destino:", **lbl_opts).pack(anchor="w", padx=30, pady=(12, 2))
+        to_langs_list = [k for k in LANGS.keys() if k != "Auto Detect"]
+        self.to_lang = ttk.Combobox(root, width=45, values=to_langs_list)
+        
+        default_to_idx = 0
+        if "to_lang" in settings and settings["to_lang"] in to_langs_list:
+            default_to_idx = to_langs_list.index(settings["to_lang"])
+        self.to_lang.current(default_to_idx)
+        self.to_lang.pack(padx=30, fill="x")
+
+        # 🎛️ VOICE PITCH SLIDER
+        tk.Label(root, text="Voice Pitch (Tom de Voz):", **lbl_opts).pack(anchor="w", padx=30, pady=(15, 2))
+        slider_frame = tk.Frame(root, bg="#181818")
+        slider_frame.pack(fill="x", padx=30)
+        
+        tk.Label(slider_frame, text="Grave", bg="#181818", fg="#777777", font=("Segoe UI", 8, "bold")).pack(side="left")
+        
+        self.pitch_scale = tk.Scale(slider_frame, from_=-50, to=50, orient=tk.HORIZONTAL,
+                                    bg="#181818", fg="#FFFFFF", highlightthickness=0,
+                                    troughcolor="#252525", activebackground="#4C8BF5",
+                                    showvalue=True, bd=0)
+        self.pitch_scale.set(settings.get("pitch", 0))
+        self.pitch_scale.pack(side="left", fill="x", expand=True, padx=8)
+        
+        tk.Label(slider_frame, text="Agudo", bg="#181818", fg="#777777", font=("Segoe UI", 8, "bold")).pack(side="right")
+
+        # 🔊 SAÍDA DE ÁUDIO (OUTPUT)
+        tk.Label(root, text="Dispositivo de saída (VB-Cable / Headset):", **lbl_opts).pack(anchor="w", padx=30, pady=(12, 2))
         self.outputs = [
             (i, d["name"])
             for i, d in enumerate(devices)
             if d["max_output_channels"] > 0
         ]
-
-        self.out = ttk.Combobox(root, width=80)
+        self.out = ttk.Combobox(root, width=45)
         self.out["values"] = [f"{i} - {n}" for i, n in self.outputs]
         
-        # Selecionar saída salva ou primeira disponível
         default_out_idx = 0
         if "out" in settings:
             for idx, (_, name) in enumerate(self.outputs):
@@ -85,44 +152,28 @@ class App:
                     break
         if self.outputs:
             self.out.current(default_out_idx)
-        self.out.pack(pady=5)
+        self.out.pack(padx=30, fill="x")
 
-        # 🌍 FROM LANG
-        tk.Label(root, text="Idioma origem").pack()
+        # Espaçador
+        tk.Frame(root, height=10, bg="#181818").pack()
 
-        from_langs_list = list(LANGS.keys())
-        self.from_lang = ttk.Combobox(root, values=from_langs_list, width=40)
-        
-        default_from_idx = 1 # padrão Português (BR)
-        if "from_lang" in settings and settings["from_lang"] in from_langs_list:
-            default_from_idx = from_langs_list.index(settings["from_lang"])
-        self.from_lang.current(default_from_idx)
-        self.from_lang.pack()
+        # ▶ BOTÃO START LISTENING
+        self.btn_start = tk.Button(root, text="START LISTENING", command=self.toggle_service,
+                                   bg="#252525", fg="#FFFFFF", font=("Segoe UI", 11, "bold"),
+                                   activebackground="#333333", activeforeground="#FFFFFF",
+                                   bd=0, relief="flat", height=2, cursor="hand2")
+        self.btn_start.pack(padx=30, fill="x", pady=(15, 8))
 
-        # 🌍 TO LANG
-        tk.Label(root, text="Idioma destino").pack()
+        # 🧹 BOTÃO CLEAR CHATBOX TEXT
+        self.btn_clear = tk.Button(root, text="Clear Chatbox text", command=self.clear_chatbox,
+                                   bg="#1F1F1F", fg="#888888", font=("Segoe UI", 9),
+                                   activebackground="#252525", activeforeground="#CCCCCC",
+                                   bd=0, relief="flat", height=1, cursor="hand2")
+        self.btn_clear.pack(padx=30, fill="x", pady=(0, 10))
 
-        to_langs_list = [k for k in LANGS.keys() if k != "Auto Detect"]
-        self.to_lang = ttk.Combobox(root, values=to_langs_list, width=40)
-        
-        default_to_idx = 0 # padrão Inglês (US)
-        if "to_lang" in settings and settings["to_lang"] in to_langs_list:
-            default_to_idx = to_langs_list.index(settings["to_lang"])
-        self.to_lang.current(default_to_idx)
-        self.to_lang.pack()
-
-        # 🎙 VOZ
-        tk.Label(root, text="Voz (automática por idioma)").pack()
-
-        self.voice_label = tk.Label(root, text="Auto (baseado no idioma)")
-        self.voice_label.pack()
-
-        # ▶ START
-        self.btn_start = tk.Button(root, text="START", command=self.toggle_service, height=2, width=15)
-        self.btn_start.pack(pady=15)
-
-        self.status = tk.Label(root, text="Parado", font=("Arial", 12))
-        self.status.pack()
+        # 📝 BARRA DE STATUS
+        self.status = tk.Label(root, text="Parado", font=("Segoe UI", 9), bg="#181818", fg="#666666")
+        self.status.pack(pady=10)
 
     def toggle_service(self):
         if not self.running:
@@ -130,13 +181,12 @@ class App:
                 mic_index = int(self.mic.get().split(" - ")[0])
                 out_index = int(self.out.get().split(" - ")[0])
             except (IndexError, ValueError, AttributeError):
-                self.status.config(text="Erro: Selecione microfone e saída!")
+                self.status.config(text="Erro: Selecione microfone e saída!", fg="#FF3333")
                 return
 
             engine.set_output_index(out_index)
             self.mic_index = mic_index
 
-            # Salvar as últimas configurações selecionadas
             try:
                 mic_name = self.mic.get().split(" - ", 1)[1]
             except IndexError:
@@ -151,11 +201,12 @@ class App:
                 "mic": mic_name,
                 "out": out_name,
                 "from_lang": self.from_lang.get(),
-                "to_lang": self.to_lang.get()
+                "to_lang": self.to_lang.get(),
+                "pitch": self.pitch_scale.get()
             })
 
-            self.status.config(text="Rodando...")
-            self.btn_start.config(text="STOP", bg="#ff4d4d", fg="white")
+            self.status.config(text="Escutando...", fg="#4C8BF5")
+            self.btn_start.config(text="STOP LISTENING", bg="#A31D1D")
             self.mic.config(state="disabled")
             self.out.config(state="disabled")
             
@@ -163,10 +214,18 @@ class App:
             threading.Thread(target=self.run_engine, daemon=True).start()
         else:
             self.running = False
-            self.status.config(text="Parado")
-            self.btn_start.config(text="START", bg="SystemButtonFace", fg="black")
+            self.status.config(text="Parado", fg="#666666")
+            self.btn_start.config(text="START LISTENING", bg="#252525")
             self.mic.config(state="normal")
             self.out.config(state="normal")
+
+    def clear_chatbox(self):
+        try:
+            from core.osc import send_chat
+            send_chat("")
+            self.status.config(text="Chatbox limpo!", fg="#4C8BF5")
+        except Exception as e:
+            self.status.config(text=f"Erro ao limpar: {e}", fg="#FF3333")
 
     def run_engine(self):
         from core.speech_to_text import listen, adjust_noise
@@ -193,6 +252,9 @@ class App:
                 except KeyError:
                     current_to = "en"
 
+                # Lê o pitch em tempo real da interface
+                current_pitch = self.pitch_scale.get()
+
                 translated = translate(text, current_to)
 
                 print("Você:", text)
@@ -200,7 +262,7 @@ class App:
 
                 send_chat(f"({text}) → {translated}")
 
-                speak(translated, current_to)
+                speak(translated, current_to, current_pitch)
 
 
 if __name__ == "__main__":
