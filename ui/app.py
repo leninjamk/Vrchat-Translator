@@ -96,7 +96,7 @@ class App:
         from core.osc import send_chat
 
         while self.running:
-            text = listen(self.mic_index)
+            text = listen(self.mic_index, self.lang_from)
 
             if text:
                 translated = translate(text, self.lang_to)

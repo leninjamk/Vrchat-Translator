@@ -7,3 +7,4 @@ pydub
 sounddevice
 soundfile
 deep_translator
+edge_tts

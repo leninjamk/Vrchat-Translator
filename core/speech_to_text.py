@@ -7,7 +7,7 @@ r.energy_threshold = 300
 r.pause_threshold = 0.8
 
 
-def listen(mic_index):
+def listen(mic_index, language="pt-BR"):
     try:
         with sr.Microphone(device_index=mic_index) as source:
             r.adjust_for_ambient_noise(source, duration=0.5)
@@ -15,7 +15,8 @@ def listen(mic_index):
             audio = r.listen(source, phrase_time_limit=8)
 
         try:
-            text = r.recognize_google(audio, language="pt-BR")
+            lang = language if language and language != "auto" else "pt-BR"
+            text = r.recognize_google(audio, language=lang)
             return text
 
         except:
