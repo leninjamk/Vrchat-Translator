@@ -1,7 +1,8 @@
 @echo off
-cd /d "C:\Users\AnonymousBR\Desktop\Projetos Python\Tradutor 2.0"
+:: Garante que o script roda no diretorio onde o arquivo .bat esta localizado
+cd /d "%~dp0"
 
-:: Executa o aplicativo de forma desacoplada e limpa
+:: Executa o aplicativo de forma desacoplada e limpa usando a .venv local
 start "" ".venv\Scripts\pythonw.exe" "ui\app.py"
 
 :: Fecha o CMD imediatamente

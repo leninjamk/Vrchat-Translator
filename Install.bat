@@ -1,5 +1,6 @@
 @echo off
-cd /d "C:\Users\AnonymousBR\Desktop\Projetos Python\Tradutor 2.0"
+:: Garante que o script roda no diretorio onde o arquivo .bat esta localizado
+cd /d "%~dp0"
 
 echo ===================================================
 echo             Instalador de Dependencias
@@ -7,19 +8,22 @@ echo             Translator By: LeNinjaMK
 echo ===================================================
 echo.
 
-:: 1. Procurar e priorizar uma instalação estável do Python (3.10 ou 3.11)
+:: 1. Procurar e priorizar uma instalação estável do Python (3.10 ou 3.11) usando variáveis de ambiente dinâmicas do sistema
 set "PYTHON_EXE="
 
-if exist "C:\Users\AnonymousBR\AppData\Local\Programs\Python\Python310\python.exe" (
-    set "PYTHON_EXE=C:\Users\AnonymousBR\AppData\Local\Programs\Python\Python310\python.exe"
+:: Verifica primeiro na pasta padrao do Python 3.10 do usuário logado
+if exist "%LOCALAPPDATA%\Programs\Python\Python310\python.exe" (
+    set "PYTHON_EXE=%LOCALAPPDATA%\Programs\Python\Python310\python.exe"
     goto python_found
 )
 
-if exist "C:\Users\AnonymousBR\AppData\Local\Programs\Python\Python311\python.exe" (
-    set "PYTHON_EXE=C:\Users\AnonymousBR\AppData\Local\Programs\Python\Python311\python.exe"
+:: Verifica na pasta padrao do Python 3.11 do usuário logado
+if exist "%LOCALAPPDATA%\Programs\Python\Python311\python.exe" (
+    set "PYTHON_EXE=%LOCALAPPDATA%\Programs\Python\Python311\python.exe"
     goto python_found
 )
 
+:: Fallback para o PATH geral do sistema
 python --version >nul 2>&1
 if not errorlevel 1 (
     set "PYTHON_EXE=python"
@@ -44,8 +48,8 @@ del "python_installer.exe"
 for /f "tokens=2*" %%A in ('reg query "HKLM\System\CurrentControlSet\Control\Session Manager\Environment" /v Path 2^>nul') do set "Path=%%B"
 for /f "tokens=2*" %%A in ('reg query "HKCU\Environment" /v Path 2^>nul') do set "Path=!Path!;%%B"
 
-if exist "C:\Users\AnonymousBR\AppData\Local\Programs\Python\Python310\python.exe" (
-    set "PYTHON_EXE=C:\Users\AnonymousBR\AppData\Local\Programs\Python\Python310\python.exe"
+if exist "%LOCALAPPDATA%\Programs\Python\Python310\python.exe" (
+    set "PYTHON_EXE=%LOCALAPPDATA%\Programs\Python\Python310\python.exe"
     goto python_found
 )
 python --version >nul 2>&1
@@ -60,7 +64,7 @@ goto end_error
 echo [✔️] Python de origem selecionado: %PYTHON_EXE%
 echo.
 
-:: 2. SEMPRE recriar a .venv se houver qualquer suspeita de vínculo com o Python 3.14 global
+:: 2. Sempre recriar a .venv se houver qualquer suspeita de vínculo com versão incorreta
 if exist ".venv" (
     echo [*] Limpando pasta .venv existente para evitar conflitos de versao...
     rmdir /s /q ".venv"
