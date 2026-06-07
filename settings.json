@@ -1,8 +1,8 @@
 {
-    "mic": "Microphone (fifine SC3)",
+    "mic": "Interface de áudio digital (Val",
     "out": "CABLE Input (VB-Audio Virtual C",
     "from_lang": "Português (BR)",
-    "to_lang": "Espanhol",
+    "to_lang": "Português (BR)",
     "beep": true,
     "tts_voice": true,
     "chatbox": true,
