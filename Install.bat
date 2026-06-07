@@ -1,6 +1,4 @@
 @echo off
-setlocal enabledelayedexpansion
-
 cd /d "C:\Users\AnonymousBR\Desktop\Projetos Python\Tradutor 2.0"
 
 echo ===================================================
@@ -9,82 +7,100 @@ echo             Translator By: LeNinjaMK
 echo ===================================================
 echo.
 
-:: 1. Verificar se o Python ja esta instalado no sistema
+:: 1. Procurar e priorizar uma instalação estável do Python (3.10 ou 3.11)
+set "PYTHON_EXE="
+
+if exist "C:\Users\AnonymousBR\AppData\Local\Programs\Python\Python310\python.exe" (
+    set "PYTHON_EXE=C:\Users\AnonymousBR\AppData\Local\Programs\Python\Python310\python.exe"
+    goto python_found
+)
+
+if exist "C:\Users\AnonymousBR\AppData\Local\Programs\Python\Python311\python.exe" (
+    set "PYTHON_EXE=C:\Users\AnonymousBR\AppData\Local\Programs\Python\Python311\python.exe"
+    goto python_found
+)
+
 python --version >nul 2>&1
-if %errorlevel% neq 0 (
-    echo [!] Python nao foi encontrado no seu sistema.
-    echo [*] Iniciando o download automatico do Python 3.10.11 para Windows...
-    
-    :: URL oficial do instalador silencioso (executable installer) do Python 3.10.11 x64
-    set "PYTHON_URL=https://www.python.org/ftp/python/3.10.11/python-3.10.11-amd64.exe"
-    set "INSTALLER_NAME=python_installer.exe"
-    
-    :: Baixa usando PowerShell nativo do Windows
-    powershell -Command "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; (New-Object System.Net.WebClient).DownloadFile('!PYTHON_URL!', '!INSTALLER_NAME!')"
-    
-    if not exist "!INSTALLER_NAME!" (
-        echo [X] Falha no download do instalador do Python. Verifique sua conexao de internet.
-        pause
-        exit /b
-    )
-    
-    echo [*] Instalando Python silenciosamente. Por favor, aguarde...
-    :: Executa instalacao silenciosa adicionando ao PATH para todos os usuarios
-    start /wait "" "!INSTALLER_NAME!" /quiet InstallAllUsers=1 PrependPath=1 Include_test=0
-    
-    :: Limpa o instalador baixado
-    del "!INSTALLER_NAME!"
-    
-    :: Recarrega a variavel PATH na sessao do CMD atual para reconhecer o Python instalado
-    for /f "tokens=2*" %%A in ('reg query "HKLM\System\CurrentControlSet\Control\Session Manager\Environment" /v Path 2^>nul') do set "Path=%%B"
-    for /f "tokens=2*" %%A in ('reg query "HKCU\Environment" /v Path 2^>nul') do set "Path=!Path!;%%B"
-    
-    :: Segunda checagem apos a instalacao
-    python --version >nul 2>&1
-    if !errorlevel! neq 0 (
-        echo [X] A instalacao automatica do Python falhou ou requer reinicializacao do computador.
-        echo Se o erro persistir, instale o Python manualmente em: https://www.python.org/
-        pause
-        exit /b
-    )
-    echo [✔️] Python instalado com sucesso!
-) else (
-    echo [✔️] Python ja esta instalado no sistema.
+if not errorlevel 1 (
+    set "PYTHON_EXE=python"
+    goto python_found
 )
+
+echo [!] Python estavel (3.10/3.11) nao foi encontrado de forma automatica.
+echo [*] Iniciando o download do Python 3.10.11...
+
+powershell -Command "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; (New-Object System.Net.WebClient).DownloadFile('https://www.python.org/ftp/python/3.10.11/python-3.10.11-amd64.exe', 'python_installer.exe')"
+
+if exist "python_installer.exe" goto start_install
+echo [X] Falha no download do instalador do Python. Verifique sua conexao de internet.
+goto end_error
+
+:start_install
+echo [*] Abrindo instalador do Python de forma VISIVEL...
+echo [IMPORTANTE] Marque a opcao "Add Python to PATH" antes de clicar em instalar!
+start /wait "" "python_installer.exe"
+del "python_installer.exe"
+
+for /f "tokens=2*" %%A in ('reg query "HKLM\System\CurrentControlSet\Control\Session Manager\Environment" /v Path 2^>nul') do set "Path=%%B"
+for /f "tokens=2*" %%A in ('reg query "HKCU\Environment" /v Path 2^>nul') do set "Path=!Path!;%%B"
+
+if exist "C:\Users\AnonymousBR\AppData\Local\Programs\Python\Python310\python.exe" (
+    set "PYTHON_EXE=C:\Users\AnonymousBR\AppData\Local\Programs\Python\Python310\python.exe"
+    goto python_found
+)
+python --version >nul 2>&1
+if not errorlevel 1 (
+    set "PYTHON_EXE=python"
+    goto python_found
+)
+echo [X] O Python nao foi detectado apos a instalacao.
+goto end_error
+
+:python_found
+echo [✔️] Python de origem selecionado: %PYTHON_EXE%
 echo.
 
-:: 2. Criar ambiente virtual se nao existir
-if not exist ".venv" (
-    echo [*] Criando ambiente virtual (.venv)...
-    python -m venv .venv
-    if !errorlevel! neq 0 (
-        echo [X] Erro ao criar o ambiente virtual.
-        pause
-        exit /b
-    )
-    echo [✔️] Ambiente virtual criado com sucesso!
-) else (
-    echo [✔️] Ambiente virtual ja existente.
+:: 2. SEMPRE recriar a .venv se houver qualquer suspeita de vínculo com o Python 3.14 global
+if exist ".venv" (
+    echo [*] Limpando pasta .venv existente para evitar conflitos de versao...
+    rmdir /s /q ".venv"
 )
-echo.
 
-:: 3. Instalar dependencias de forma visivel
+:create_venv
+echo [*] Criando novo ambiente virtual (.venv) usando o Python estavel...
+"%PYTHON_EXE%" -m venv .venv
+if errorlevel 1 goto venv_error
+echo [✔️] Ambiente virtual criado com sucesso!
+goto install_deps
+
+:venv_error
+echo [X] Erro ao criar o ambiente virtual (.venv).
+goto end_error
+
+:install_deps
+echo.
+:: 3. Instalar as dependências usando o isolamento "python.exe -m pip"
 echo [*] Instalando dependencias (requirements.txt)...
 ".venv\Scripts\python.exe" -m pip install --upgrade pip
-".venv\Scripts\pip.exe" install -r requirements.txt
-if %errorlevel% neq 0 (
-    echo.
-    echo [X] Ocorreu um erro durante a instalacao dos requisitos.
-    echo Verifique os logs acima e sua conexao com a internet.
-    echo.
-    pause
-    exit /b
-)
+".venv\Scripts\python.exe" -m pip install -r requirements.txt
+if not errorlevel 1 goto install_ok
 
+echo [X] Falha na instalacao de dependencias.
+goto end_error
+
+:install_ok
 echo.
 echo ===================================================
 echo [✔️] INSTALACAO CONCLUIDA COM SUCESSO!
-echo Agora voce ja pode fechar esta janela e rodar o "Run.bat"
+echo Voce ja pode fechar esta janela e rodar o "Run.bat"
 echo ===================================================
 echo.
 pause
+exit /b
+
+:end_error
+echo.
+echo [X] Falha ao concluir a instalacao. Verifique as mensagens acima.
+echo.
+pause
+exit /b
