@@ -2,6 +2,9 @@
     "mic": "Microphone (fifine SC3)",
     "out": "CABLE Input (VB-Audio Virtual C",
     "from_lang": "Português (BR)",
-    "to_lang": "Português (BR)",
-    "beep": true
+    "to_lang": "Espanhol",
+    "beep": true,
+    "tts_voice": true,
+    "chatbox": true,
+    "dual_lang": true
 }

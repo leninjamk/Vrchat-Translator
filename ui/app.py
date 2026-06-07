@@ -78,11 +78,13 @@ class App:
 
         # 🎤 MICROFONE (INPUT)
         tk.Label(root, text="Dispositivo de entrada (Microfone):", **lbl_opts).pack(anchor="w", padx=30, pady=(5, 2))
-        self.inputs = [
-            (i, d["name"])
-            for i, d in enumerate(devices)
-            if d["max_input_channels"] > 0
-        ]
+        # Deduplica por nome para evitar duplicatas de WASAPI/MME/DirectSound
+        _seen_in = set()
+        self.inputs = []
+        for i, d in enumerate(devices):
+            if d["max_input_channels"] > 0 and d["name"] not in _seen_in:
+                _seen_in.add(d["name"])
+                self.inputs.append((i, d["name"]))
         self.mic = ttk.Combobox(root, width=45)
         self.mic["values"] = [f"{i} - {n}" for i, n in self.inputs]
         
@@ -136,11 +138,13 @@ class App:
 
         # 🔊 SAÍDA DE ÁUDIO (OUTPUT)
         tk.Label(root, text="Dispositivo de saída (VB-Cable / Headset):", **lbl_opts).pack(anchor="w", padx=30, pady=(12, 2))
-        self.outputs = [
-            (i, d["name"])
-            for i, d in enumerate(devices)
-            if d["max_output_channels"] > 0
-        ]
+        # Deduplica por nome para evitar duplicatas de WASAPI/MME/DirectSound
+        _seen_out = set()
+        self.outputs = []
+        for i, d in enumerate(devices):
+            if d["max_output_channels"] > 0 and d["name"] not in _seen_out:
+                _seen_out.add(d["name"])
+                self.outputs.append((i, d["name"]))
         self.out = ttk.Combobox(root, width=45)
         self.out["values"] = [f"{i} - {n}" for i, n in self.outputs]
         
@@ -185,6 +189,47 @@ class App:
         )
         self.beep_check.pack(side="left")
 
+        # ══ TOGGLE BUTTONS: TTS / Chatbox / Dual Language ══════════
+        tk.Label(root, text="Ativar / Desativar recursos:",
+                 bg="#181818", fg="#555555", font=("Segoe UI", 8)).pack(anchor="w", padx=30, pady=(4, 2))
+
+        toggles_frame = tk.Frame(root, bg="#181818")
+        toggles_frame.pack(padx=30, fill="x", pady=(0, 8))
+
+        self.tts_var      = tk.BooleanVar(value=settings.get("tts_voice", True))
+        self.chatbox_var  = tk.BooleanVar(value=settings.get("chatbox",   True))
+        self.dual_lang_var = tk.BooleanVar(value=settings.get("dual_lang", True))
+
+        _ACTIVE_BG, _ACTIVE_FG   = "#12334D", "#4C8BF5"
+        _INACTIVE_BG, _INACTIVE_FG = "#1E1E1E", "#444444"
+
+        def _make_toggle(parent, text, var):
+            btn = tk.Button(
+                parent, text=text,
+                bg=_ACTIVE_BG   if var.get() else _INACTIVE_BG,
+                fg=_ACTIVE_FG   if var.get() else _INACTIVE_FG,
+                font=("Segoe UI", 8, "bold"),
+                activebackground="#252525", activeforeground="#CCCCCC",
+                bd=0, relief="flat", cursor="hand2", pady=6
+            )
+            def _toggle(b=btn, v=var):
+                v.set(not v.get())
+                b.config(
+                    bg=_ACTIVE_BG   if v.get() else _INACTIVE_BG,
+                    fg=_ACTIVE_FG   if v.get() else _INACTIVE_FG
+                )
+            btn.config(command=_toggle)
+            return btn
+
+        self.btn_tts_toggle  = _make_toggle(toggles_frame, "🔊 TTS Voice",    self.tts_var)
+        self.btn_tts_toggle.pack(side="left", expand=True, fill="x", padx=(0, 2))
+
+        self.btn_chatbox_toggle = _make_toggle(toggles_frame, "💬 Chatbox", self.chatbox_var)
+        self.btn_chatbox_toggle.pack(side="left", expand=True, fill="x", padx=2)
+
+        self.btn_dual_toggle = _make_toggle(toggles_frame, "🌐 Dual Lang", self.dual_lang_var)
+        self.btn_dual_toggle.pack(side="left", expand=True, fill="x", padx=(2, 0))
+
         # 📝 BARRA DE STATUS
         self.status = tk.Label(root, text="Parado", font=("Segoe UI", 9), bg="#181818", fg="#666666")
         self.status.pack(pady=8)
@@ -212,11 +257,14 @@ class App:
                 out_name = self.out.get()
 
             save_settings({
-                "mic": mic_name,
-                "out": out_name,
+                "mic":       mic_name,
+                "out":       out_name,
                 "from_lang": self.from_lang.get(),
-                "to_lang": self.to_lang.get(),
-                "beep": self.beep_var.get()
+                "to_lang":   self.to_lang.get(),
+                "beep":      self.beep_var.get(),
+                "tts_voice": self.tts_var.get(),
+                "chatbox":   self.chatbox_var.get(),
+                "dual_lang": self.dual_lang_var.get()
             })
 
             self.status.config(text="Escutando...", fg="#4C8BF5")
@@ -287,19 +335,28 @@ class App:
                 same_lang = (lang_from_code == current_to)
 
                 if same_lang:
-                    # Mesmo idioma: apenas fala o texto original sem tradução
+                    # Mesmo idioma: apenas TTS com o texto original, sem tradução
                     print("Você:", text)
                     print("(Sem tradução - mesmo idioma)")
-                    send_chat(text)
-                    speak(text, current_to, current_pitch)
+                    if self.chatbox_var.get():
+                        send_chat(text)
+                    if self.tts_var.get():
+                        speak(text, current_to, current_pitch)
                 else:
                     translated = translate(text, current_to)
 
                     print("Você:", text)
                     print("Traduzido:", translated)
 
-                    send_chat(f"({text}) → {translated}")
-                    speak(translated, current_to, current_pitch)
+                    if self.chatbox_var.get():
+                        # Dual Language ON  → "(original) → traduzido"
+                        # Dual Language OFF → apenas "traduzido"
+                        if self.dual_lang_var.get():
+                            send_chat(f"({text}) → {translated}")
+                        else:
+                            send_chat(translated)
+                    if self.tts_var.get():
+                        speak(translated, current_to, current_pitch)
 
 
 if __name__ == "__main__":
