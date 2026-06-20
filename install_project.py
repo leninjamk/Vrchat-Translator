@@ -53,10 +53,16 @@ def get_python_exe():
     return None
 
 
-def run(cmd, **kwargs):
-    """Executa um comando e retorna o codigo de saida."""
-    print(f"    > {' '.join(str(c) for c in cmd)}")
-    result = subprocess.run(cmd, **kwargs)
+def run_silent(cmd, label):
+    """Executa um comando mostrando apenas um label amigavel (sem paths absolutos)."""
+    print(f"    {label}...")
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0 and result.stderr:
+        # Mostra erros relevantes mas sem paths absolutos do sistema
+        lines = [l for l in result.stderr.splitlines()
+                 if not l.strip().startswith(">") and "WARNING" not in l]
+        if lines:
+            print("    " + "\n    ".join(lines[:5]))
     return result.returncode
 
 
@@ -78,11 +84,18 @@ def main():
     if not python_exe:
         print("[X] ERRO: Python 3.9+ nao encontrado.")
         print("    O Install.bat deveria ter instalado automaticamente.")
-        print("    Se o problema persistir, instale manualmente:")
-        print("    https://www.python.org/downloads/")
+        print("    Se persistir, instale em: https://www.python.org/downloads/")
         sys.exit(1)
 
-    print(f"[OK] Python encontrado: {python_exe}")
+    # Extrai apenas a versao para exibir (sem expor o caminho completo)
+    try:
+        ver_result = subprocess.run([python_exe, "--version"],
+                                    capture_output=True, text=True, timeout=5)
+        py_version = ver_result.stdout.strip() or ver_result.stderr.strip()
+    except Exception:
+        py_version = "Python (encontrado)"
+
+    print(f"[OK] {py_version} encontrado!")
     print()
 
     # ── 2. Criar/recriar .venv ────────────────────────────────────────────────
@@ -90,28 +103,32 @@ def main():
         print("[*] Removendo ambiente virtual anterior...")
         shutil.rmtree(venv_dir, ignore_errors=True)
         if os.path.exists(venv_dir):
-            # rmtree pode falhar no Windows; usa cmd como fallback
-            subprocess.run(f'rmdir /s /q "{venv_dir}"', shell=True)
+            subprocess.run(f'rmdir /s /q "{venv_dir}"', shell=True,
+                           capture_output=True)
 
-    print("[*] Criando novo ambiente virtual (.venv)...")
-    code = run([python_exe, "-m", "venv", venv_dir])
-    if code != 0:
+    print("[*] Criando ambiente virtual (.venv)...")
+    result = subprocess.run([python_exe, "-m", "venv", venv_dir],
+                            capture_output=True, text=True)
+    if result.returncode != 0:
         print("[X] ERRO: Falha ao criar ambiente virtual.")
+        if result.stderr:
+            print("   ", result.stderr[:200])
         sys.exit(1)
     print("[OK] Ambiente virtual criado!")
     print()
 
     # ── 3. Caminhos do venv ───────────────────────────────────────────────────
     venv_python = os.path.join(venv_dir, "Scripts", "python.exe")
-    venv_pip    = os.path.join(venv_dir, "Scripts", "pip.exe")
 
     if not os.path.isfile(venv_python):
-        print("[X] ERRO: python.exe nao encontrado no .venv criado.")
+        print("[X] ERRO: python.exe nao encontrado no .venv.")
         sys.exit(1)
 
-    # ── 4. Atualizar pip ─────────────────────────────────────────────────────
+    # ── 4. Atualizar pip ──────────────────────────────────────────────────────
     print("[*] Atualizando pip...")
-    run([venv_python, "-m", "pip", "install", "--upgrade", "pip", "--quiet"])
+    subprocess.run([venv_python, "-m", "pip", "install", "--upgrade", "pip", "--quiet"],
+                   capture_output=True)
+    print("[OK] Pip atualizado!")
     print()
 
     # ── 5. Instalar dependencias ──────────────────────────────────────────────
@@ -123,9 +140,12 @@ def main():
     print("    Isso pode levar alguns minutos...")
     print()
 
-    code = run([venv_python, "-m", "pip", "install", "-r", req_file])
+    # Roda com output visivel para o usuario acompanhar o progresso
+    result = subprocess.run(
+        [venv_python, "-m", "pip", "install", "-r", req_file]
+    )
 
-    if code != 0:
+    if result.returncode != 0:
         print()
         print("[X] ERRO: Falha ao instalar dependencias.")
         print("    Verifique sua conexao com a internet e tente novamente.")
@@ -136,13 +156,11 @@ def main():
     print("=" * 51)
     print("[OK] INSTALACAO CONCLUIDA COM SUCESSO!")
     print()
-    print("     Agora feche esta janela e execute:")
-    print("     Run.bat")
+    print("     Feche esta janela e execute o Run.bat")
     print("=" * 51)
     print()
-
-    # Aguarda 5 segundos e fecha automaticamente
     print("Esta janela fecha automaticamente em 5 segundos...")
+
     import time
     time.sleep(5)
 

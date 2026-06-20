@@ -1,0 +1,27 @@
+# ─── Ambiente virtual (gerado pelo Install.bat em cada máquina) ───────────────
+.venv/
+venv/
+env/
+
+# ─── Configurações pessoais (dispositivos de áudio de cada usuário) ───────────
+settings.json
+
+# ─── Cache Python ─────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+
+# ─── Arquivos temporários de audio ────────────────────────────────────────────
+*.mp3
+*.wav
+
+# ─── IDEs / Editores ──────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.suo
+*.user
+
+# ─── Sistema Operacional ──────────────────────────────────────────────────────
+Thumbs.db
+.DS_Store
+desktop.ini
