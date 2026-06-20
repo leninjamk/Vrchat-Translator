@@ -1,104 +1,151 @@
+"""
+Instalador de dependencias - VRChat Translator By LeNinjaMK
+Execucao 100% autonoma: sem interacao do usuario.
+"""
 import os
 import sys
 import subprocess
-import urllib.request
+import shutil
+
 
 def get_python_exe():
-    local_app_data = os.environ.get("LOCALAPPDATA", "")
-    program_files = os.environ.get("ProgramFiles", "")
-    program_files_x86 = os.environ.get("ProgramFiles(x86)", "")
-    
-    paths = [
-        os.path.join(local_app_data, r"Programs\Python\Python310\python.exe"),
-        os.path.join(local_app_data, r"Programs\Python\Python311\python.exe"),
-        os.path.join(program_files, r"Python310\python.exe"),
-        os.path.join(program_files, r"Python311\python.exe"),
-        os.path.join(program_files_x86, r"Python310\python.exe"),
-        os.path.join(program_files_x86, r"Python311\python.exe"),
-        r"C:\Python310\python.exe",
-        r"C:\Python311\python.exe",
-    ]
-    
-    for path in paths:
-        if os.path.exists(path):
+    """
+    Localiza um Python 3.9+ valido no sistema.
+    Ignora o alias da Microsoft Store (WindowsApps).
+    """
+    local_app_data  = os.environ.get("LOCALAPPDATA", "")
+    program_files   = os.environ.get("ProgramFiles", "")
+    program_files86 = os.environ.get("ProgramFiles(x86)", "")
+    user_profile    = os.environ.get("USERPROFILE", "")
+
+    versions = ["313", "312", "311", "310", "39"]
+    candidates = []
+
+    for v in versions:
+        candidates += [
+            os.path.join(local_app_data, f"Programs\\Python\\Python{v}\\python.exe"),
+            os.path.join(user_profile,   f"AppData\\Local\\Programs\\Python\\Python{v}\\python.exe"),
+            os.path.join(program_files,  f"Python{v}\\python.exe"),
+            os.path.join(program_files86, f"Python{v}\\python.exe"),
+            f"C:\\Python{v}\\python.exe",
+        ]
+
+    for path in candidates:
+        if os.path.isfile(path):
             return path
-            
-    ver = sys.version_info
-    if ver.major == 3 and ver.minor in (10, 11):
+
+    # Executavel atual (se rodar via outro Python valido)
+    if sys.version_info >= (3, 9) and "WindowsApps" not in sys.executable:
         return sys.executable
-        
+
+    # Ultimo recurso: python no PATH, excluindo alias da Store
+    for cmd in ("python", "python3"):
+        found = shutil.which(cmd)
+        if found and "WindowsApps" not in found:
+            try:
+                r = subprocess.run([found, "--version"],
+                                   capture_output=True, text=True, timeout=5)
+                if r.returncode == 0:
+                    return found
+            except Exception:
+                pass
+
     return None
 
-def download_python():
-    print("[!] Python 3.10/3.11 estavel nao foi localizado.")
-    print("[*] Baixando instalador do Python 3.10.11 do site oficial...")
-    url = "https://www.python.org/ftp/python/3.10.11/python-3.10.11-amd64.exe"
-    installer = "python_installer.exe"
-    try:
-        urllib.request.urlretrieve(url, installer)
-        print("[OK] Download concluido!")
-        print("[*] Iniciando instalador visual. IMPORTANTE: Marque 'Add Python to PATH' na instalacao!")
-        subprocess.run([installer], check=True)
-        if os.path.exists(installer):
-            os.remove(installer)
-    except Exception as e:
-        print(f"[X] Erro ao baixar/instalar o Python: {e}")
-        input("Pressione Enter para fechar...")
-        sys.exit(1)
+
+def run(cmd, **kwargs):
+    """Executa um comando e retorna o codigo de saida."""
+    print(f"    > {' '.join(str(c) for c in cmd)}")
+    result = subprocess.run(cmd, **kwargs)
+    return result.returncode
+
 
 def main():
-    print("===================================================")
-    print("             Instalador de Dependencias")
-    print("             Translator By: LeNinjaMK")
-    print("===================================================")
+    root_dir = os.path.dirname(os.path.abspath(__file__))
+    venv_dir = os.path.join(root_dir, ".venv")
+    req_file = os.path.join(root_dir, "requirements.txt")
+
+    print()
+    print("=" * 51)
+    print("        Instalador de Dependencias")
+    print("        VRChat Translator By: LeNinjaMK")
+    print("=" * 51)
     print()
 
+    # ── 1. Localizar Python ───────────────────────────────────────────────────
     python_exe = get_python_exe()
+
     if not python_exe:
-        download_python()
-        python_exe = get_python_exe()
-        if not python_exe:
-            print("[X] Python nao foi localizado apos a instalacao. Por favor, reinicie e tente de novo.")
-            input("Pressione Enter para fechar...")
-            sys.exit(1)
-            
-    print(f"[OK] Python estavel selecionado: {python_exe}")
-    print()
-
-    # 2. Criar ou recriar a .venv
-    venv_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".venv")
-    if os.path.exists(venv_dir):
-        print("[*] Limpando pasta .venv antiga...")
-        subprocess.run(f'rmdir /s /q "{venv_dir}"', shell=True)
-
-    print("[*] Criando ambiente virtual (.venv)...")
-    try:
-        subprocess.run([python_exe, "-m", "venv", venv_dir], check=True)
-        print("[OK] Ambiente virtual criado com sucesso!")
-    except Exception as e:
-        print(f"[X] Erro ao criar .venv: {e}")
-        input("Pressione Enter para fechar...")
+        print("[X] ERRO: Python 3.9+ nao encontrado.")
+        print("    O Install.bat deveria ter instalado automaticamente.")
+        print("    Se o problema persistir, instale manualmente:")
+        print("    https://www.python.org/downloads/")
         sys.exit(1)
 
-    # 3. Instalar dependências usando o python do .venv
-    venv_python = os.path.join(venv_dir, r"Scripts\python.exe")
+    print(f"[OK] Python encontrado: {python_exe}")
     print()
-    print("[*] Instalando pacotes necessarios (requirements.txt)...")
-    try:
-        subprocess.run([venv_python, "-m", "pip", "install", "--upgrade", "pip"], check=True)
-        req_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "requirements.txt")
-        subprocess.run([venv_python, "-m", "pip", "install", "-r", req_file], check=True)
-        
+
+    # ── 2. Criar/recriar .venv ────────────────────────────────────────────────
+    if os.path.exists(venv_dir):
+        print("[*] Removendo ambiente virtual anterior...")
+        shutil.rmtree(venv_dir, ignore_errors=True)
+        if os.path.exists(venv_dir):
+            # rmtree pode falhar no Windows; usa cmd como fallback
+            subprocess.run(f'rmdir /s /q "{venv_dir}"', shell=True)
+
+    print("[*] Criando novo ambiente virtual (.venv)...")
+    code = run([python_exe, "-m", "venv", venv_dir])
+    if code != 0:
+        print("[X] ERRO: Falha ao criar ambiente virtual.")
+        sys.exit(1)
+    print("[OK] Ambiente virtual criado!")
+    print()
+
+    # ── 3. Caminhos do venv ───────────────────────────────────────────────────
+    venv_python = os.path.join(venv_dir, "Scripts", "python.exe")
+    venv_pip    = os.path.join(venv_dir, "Scripts", "pip.exe")
+
+    if not os.path.isfile(venv_python):
+        print("[X] ERRO: python.exe nao encontrado no .venv criado.")
+        sys.exit(1)
+
+    # ── 4. Atualizar pip ─────────────────────────────────────────────────────
+    print("[*] Atualizando pip...")
+    run([venv_python, "-m", "pip", "install", "--upgrade", "pip", "--quiet"])
+    print()
+
+    # ── 5. Instalar dependencias ──────────────────────────────────────────────
+    if not os.path.isfile(req_file):
+        print("[X] ERRO: requirements.txt nao encontrado!")
+        sys.exit(1)
+
+    print("[*] Instalando dependencias (requirements.txt)...")
+    print("    Isso pode levar alguns minutos...")
+    print()
+
+    code = run([venv_python, "-m", "pip", "install", "-r", req_file])
+
+    if code != 0:
         print()
-        print("===================================================")
-        print("[OK] INSTALACAO CONCLUIDA COM SUCESSO!")
-        print("Agora voce ja pode fechar esta janela e rodar o 'Run.bat'")
-        print("===================================================")
-    except Exception as e:
-        print(f"\n[X] Erro ao instalar dependencias: {e}")
-        
+        print("[X] ERRO: Falha ao instalar dependencias.")
+        print("    Verifique sua conexao com a internet e tente novamente.")
+        sys.exit(1)
+
+    # ── 6. Sucesso ────────────────────────────────────────────────────────────
     print()
-    input("Pressione qualquer tecla para concluir...")
+    print("=" * 51)
+    print("[OK] INSTALACAO CONCLUIDA COM SUCESSO!")
+    print()
+    print("     Agora feche esta janela e execute:")
+    print("     Run.bat")
+    print("=" * 51)
+    print()
+
+    # Aguarda 5 segundos e fecha automaticamente
+    print("Esta janela fecha automaticamente em 5 segundos...")
+    import time
+    time.sleep(5)
+
 
 if __name__ == "__main__":
     main()
