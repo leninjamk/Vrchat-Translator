@@ -117,6 +117,18 @@ QPushButton#Ghost:pressed {{ background-color: {ACCENT_SOFT}; }}
 QPushButton#Ghost:disabled {{ color: #4A4A4C; border-color: {BORDER}; }}
 QPushButton#Ghost:focus {{ border-color: {ACCENT}; }}
 
+QPushButton#GhostAccent {{
+    background-color: {RECEIVED_SOFT};
+    border: 1px solid {RECEIVED_ACCENT};
+    border-radius: 10px;
+    color: {RECEIVED_ACCENT};
+    padding: 8px;
+    font-weight: 700;
+}}
+QPushButton#GhostAccent:hover {{ background-color: {RECEIVED_ACCENT}; color: white; }}
+QPushButton#GhostAccent:pressed {{ background-color: {RECEIVED_ACCENT}; color: white; }}
+QPushButton#GhostAccent:checked {{ background-color: {RECEIVED_ACCENT}; color: white; }}
+
 QPushButton#IconGhost {{
     background-color: transparent;
     border: 1px solid {BORDER};

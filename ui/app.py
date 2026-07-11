@@ -154,6 +154,7 @@ class MainWindow(QWidget):
         self.panel_open = bool(self._settings.get("panel_open", False))
         self.settings_open = bool(self._settings.get("settings_open", False))
         self._voice_overrides = dict(self._settings.get("voice_overrides", {}))
+        self._voice_combo_maps = {"my": {}, "received": {}}
 
         self.speaker_service = SpeakerRecognitionService()
         self.speaker_service.on_speech_started = lambda: self.received_status_signal.emit(*RECEIVED_STATUS_SPEECH)
@@ -211,6 +212,15 @@ class MainWindow(QWidget):
         body.addWidget(self.settings_panel, 0)
 
         body.addWidget(self._build_left_panel(), 0)
+
+        # self.received_voice_combo mora no painel de configuracoes (construido
+        # ACIMA), mas depende do idioma "Origem" (self.from_lang), que so passa
+        # a existir no painel esquerdo (construido logo acima tambem, mas
+        # DEPOIS) — por isso essa ligacao fica aqui, depois que os dois ja
+        # existem, em vez de dentro de _build_settings_panel().
+        self._refresh_voice_combo("received", self.from_lang.currentText())
+        self.from_lang.currentTextChanged.connect(lambda t: self._refresh_voice_combo("received", t))
+        self.received_voice_combo.currentTextChanged.connect(lambda _t: self._on_voice_combo_changed("received"))
 
         self.history_panel = HistoryPanel()
         # comeca sempre oculto; _finalize_initial_size() decide o estado inicial
@@ -474,11 +484,6 @@ class MainWindow(QWidget):
 
     def _build_voice_card(self):
         card, content = make_card("Voz")
-        # card mais cheio agora (2 seletores de voz novos) — aperta as margens/
-        # espacamento so DESTE card, sem mexer no make_card() compartilhado
-        content.setSpacing(2)
-        card.layout().setContentsMargins(14, 4, 14, 4)
-        card.layout().setSpacing(2)
 
         self.pitch_slider = self._build_labeled_slider(
             content, "Pitch (tom de voz)", -50, 50, 0,
@@ -494,35 +499,17 @@ class MainWindow(QWidget):
         hint_row.addWidget(agudo)
         content.addLayout(hint_row)
 
-        self._voice_combo_maps = {"my": {}, "received": {}}
-
-        my_voice_row = QHBoxLayout()
-        my_voice_row.setSpacing(6)
-        my_voice_label = QLabel("Minha:")
-        my_voice_label.setObjectName("RowHint")
-        my_voice_row.addWidget(my_voice_label, 0)
+        content.addWidget(self._row_label("Voz da minha fala (falada no idioma de Destino)"))
         self.my_voice_combo = ModernCombo(self, values=["-"])
-        self.my_voice_combo.setToolTip("Voz usada quando SUA fala é falada em voz alta (idioma = Destino)")
-        my_voice_row.addWidget(self.my_voice_combo, 1)
-        content.addLayout(my_voice_row)
-
-        received_voice_row = QHBoxLayout()
-        received_voice_row.setSpacing(6)
-        received_voice_label = QLabel("Recebida:")
-        received_voice_label.setObjectName("RowHint")
-        received_voice_row.addWidget(received_voice_label, 0)
-        self.received_voice_combo = ModernCombo(self, values=["-"])
-        self.received_voice_combo.setToolTip("Voz usada quando a fala RECEBIDA é falada em voz alta (idioma = Origem)")
-        received_voice_row.addWidget(self.received_voice_combo, 1)
-        content.addLayout(received_voice_row)
+        self.my_voice_combo.setToolTip(
+            "Voz usada quando a SUA fala traduzida é falada em voz alta pro app. "
+            "Muda de opções conforme o idioma escolhido em 'Destino'."
+        )
+        content.addWidget(self.my_voice_combo)
 
         self._refresh_voice_combo("my", self.to_lang.currentText())
-        self._refresh_voice_combo("received", self.from_lang.currentText())
-
         self.to_lang.currentTextChanged.connect(lambda t: self._refresh_voice_combo("my", t))
-        self.from_lang.currentTextChanged.connect(lambda t: self._refresh_voice_combo("received", t))
         self.my_voice_combo.currentTextChanged.connect(lambda _t: self._on_voice_combo_changed("my"))
-        self.received_voice_combo.currentTextChanged.connect(lambda _t: self._on_voice_combo_changed("received"))
 
         card.setMinimumHeight(115)
         return card
@@ -657,11 +644,14 @@ class MainWindow(QWidget):
         self._apply_listen_others(self.listen_others_switch.isChecked())
 
         self.received_advanced_btn = QPushButton()
-        self.received_advanced_btn.setObjectName("Ghost")
+        self.received_advanced_btn.setObjectName("GhostAccent")  # destacado — botao importante, abre toda a config. da fala recebida
         self.received_advanced_btn.setCheckable(True)
         self.received_advanced_btn.setCursor(Qt.PointingHandCursor)
-        self.received_advanced_btn.setFixedHeight(30)
-        self.received_advanced_btn.setToolTip("Idioma recebido, teste de áudio, overlay e sincronização de mute")
+        self.received_advanced_btn.setFixedHeight(32)
+        self.received_advanced_btn.setToolTip(
+            "Abre as configurações da fala recebida: dispositivo/aplicativo de áudio, "
+            "idiomas candidatos, teste de áudio, voz, overlay e sincronização de mute"
+        )
         self.received_advanced_btn.setChecked(self.settings_open)
         self._update_settings_button_text()
         self.received_advanced_btn.toggled.connect(self._on_advanced_settings_toggled)
@@ -687,6 +677,11 @@ class MainWindow(QWidget):
         settings = self._settings
 
         card, content = make_card("Fala Recebida — Config.")
+        # card ja tinha bastante conteudo e ganhou mais uma linha (voz da fala
+        # recebida) — aperta margens/espacamento so DESTE card pra caber tudo
+        content.setSpacing(2)
+        card.layout().setContentsMargins(14, 4, 14, 4)
+        card.layout().setSpacing(2)
 
         content.addWidget(self._row_label("Áudio recebido (o que o VRChat reproduz)"))
         self.loopback_devices = list_loopback_devices()
@@ -773,6 +768,24 @@ class MainWindow(QWidget):
             "nunca ouve e o VRChat manda essa fala de volta pros outros como se fosse sua."
         )
         content.addWidget(self.received_tts_output_combo)
+
+        received_voice_row = QHBoxLayout()
+        received_voice_row.setSpacing(6)
+        received_voice_label = QLabel("Voz:")
+        received_voice_label.setObjectName("RowHint")
+        received_voice_row.addWidget(received_voice_label, 0)
+        self.received_voice_combo = ModernCombo(self, values=["-"])
+        self.received_voice_combo.setToolTip(
+            "Voz usada quando a fala RECEBIDA (já traduzida pro seu idioma) é falada em "
+            "voz alta aqui — a mesma fala que sai no dispositivo escolhido acima. Muda de "
+            "opções conforme o idioma escolhido em 'Origem (meu idioma)'."
+        )
+        received_voice_row.addWidget(self.received_voice_combo, 1)
+        content.addLayout(received_voice_row)
+        # populado e conectado ao idioma "Origem" mais adiante em _build_ui(),
+        # quando self.from_lang ja existe (esse painel e construido ANTES do
+        # painel esquerdo, onde from_lang mora — ver _build_ui)
+
         saved_received_out = settings.get("received_tts_output")
         default_received_out = None
         if saved_received_out:
