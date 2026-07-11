@@ -1,16 +1,81 @@
-import tkinter as tk
-import threading
-import sounddevice as sd
-import sys, os
 import json
+import os
+import sys
+import threading
+import time
+
+import sounddevice as sd
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from core.singleton import engine
+from PySide6.QtCore import Qt, QTimer, QPoint, Signal, QVariantAnimation, QEasingCurve
+from PySide6.QtGui import QGuiApplication, QShortcut, QKeySequence
+from PySide6.QtWidgets import (
+    QApplication, QWidget, QLabel, QPushButton, QVBoxLayout, QHBoxLayout,
+    QSlider, QCheckBox, QGridLayout, QScrollArea, QFrame,
+)
+
+from core.singleton import engine, received_tts_engine
 from core.languages import LANGS
-from core.voices import VOICES
+from core.history import (
+    HistoryEntry, CATEGORY_TRANSLATED, CATEGORY_SAME_LANG, CATEGORY_ERROR, CATEGORY_RECEIVED,
+    SOURCE_LOCAL, SOURCE_RECEIVED,
+)
+from core.audio_device_manager import list_loopback_devices, get_default_loopback_device, find_loopback_device_by_name, LoopbackDeviceMonitor
+from core.speaker_loopback import SpeakerRecognitionService
+from core.vrchat_osc_receiver import VRChatOSCReceiver
+from core.overlay.overlay_manager import overlay_manager
+from core.overlay.desktop_overlay import DesktopOverlayWindow
+from core.overlay.openvr_overlay import OpenVROverlayBackend
+from ui.widgets import (
+    STYLESHEET, PRIMARY_BTN_QSS, DANGER_BTN_QSS,
+    ACCENT, DANGER, WARNING, RECEIVED_ACCENT, TEXT_MUTED,
+    STATUS_STATES, STATUS_LISTENING, STATUS_STOPPED, STATUS_ERROR,
+    make_card, ModernCombo, ToggleSwitch, StatusIndicator, LevelMeter,
+)
+from ui.history_panel import HistoryPanel
 
 SETTINGS_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "settings.json")
+
+# O painel esquerdo (controles) tem largura FIXA sempre. A ALTURA da janela
+# tambem e sempre a MESMA (calculada uma unica vez a partir do sizeHint do
+# painel esquerdo em _finalize_initial_size()) — ela NUNCA muda em runtime.
+# Os dois paineis extras (configuracoes da fala recebida, e a conversa) so
+# mexem na LARGURA: a janela ancora a borda DIREITA e cresce/encolhe pra
+# ESQUERDA conforme cada painel abre/fecha (ver _current_target_width()).
+LEFT_PANEL_WIDTH = 360
+SETTINGS_PANEL_WIDTH = 340
+ROOT_MARGIN_H = 24
+PANEL_SPACING = 16
+COMPACT_WIDTH = LEFT_PANEL_WIDTH + ROOT_MARGIN_H * 2   # 408
+EXPANDED_WIDTH = 1040
+SETTINGS_WIDTH_DELTA = SETTINGS_PANEL_WIDTH + PANEL_SPACING
+CONVERSATION_WIDTH_DELTA = EXPANDED_WIDTH - COMPACT_WIDTH
+PANEL_ANIM_MS = 260
+
+CHATBOX_MODE_OFF = "Não enviar"
+CHATBOX_MODE_ORIGINAL = "Somente original"
+CHATBOX_MODE_TRANSLATED = "Somente tradução"
+CHATBOX_MODE_BOTH = "Original + tradução"
+CHATBOX_MODES = [CHATBOX_MODE_OFF, CHATBOX_MODE_ORIGINAL, CHATBOX_MODE_TRANSLATED, CHATBOX_MODE_BOTH]
+
+OVERLAY_BACKEND_DESKTOP = "Desktop (janela flutuante)"
+OVERLAY_BACKEND_OPENVR = "SteamVR (dentro do headset)"
+OVERLAY_BACKENDS = [OVERLAY_BACKEND_DESKTOP, OVERLAY_BACKEND_OPENVR]
+
+# Idiomas candidatos pra fala recebida (todos exceto "Auto Detect" — esse so
+# faz sentido pra traducao de texto ja reconhecido, o Google recognize_google
+# nao tem um modo "automatico" de verdade, entao "tentar varias candidatas e
+# conferir o texto reconhecido" e como a gente aproxima isso aqui).
+RECEIVED_LANG_ITEMS = [(name, code) for name, code in LANGS.items() if code != "auto"]
+CODE_TO_LANG_NAME = {code: name for name, code in RECEIVED_LANG_ITEMS}
+DEFAULT_RECEIVED_LANGS = ["pt"]
+
+RECEIVED_STATUS_STOPPED = ("Parado", TEXT_MUTED)
+RECEIVED_STATUS_LISTENING = ("Ouvindo...", RECEIVED_ACCENT)
+RECEIVED_STATUS_SPEECH = ("Fala detectada", RECEIVED_ACCENT)
+RECEIVED_STATUS_TRANSLATING = ("Traduzindo...", RECEIVED_ACCENT)
+RECEIVED_STATUS_ERROR = ("Erro", DANGER)
 
 
 def load_settings():
@@ -31,412 +96,962 @@ def save_settings(settings):
         pass
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-#  VRCombobox — dropdown personalizado compatível com overlays de VR
-#  Usa Toplevel always-on-top em vez do popup nativo do Windows,
-#  que não é renderizado corretamente por SteamVR/Quest Link/Vive.
-# ─────────────────────────────────────────────────────────────────────────────
-class VRCombobox(tk.Frame):
-    def __init__(self, parent, values=None, width=45, **kwargs):
-        super().__init__(parent, bg="#252525",
-                         highlightbackground="#383838",
-                         highlightthickness=1, **kwargs)
-        self._values = list(values or [])
-        self._current_idx = 0
-        self._popup = None
-        self._state = "normal"
-        self._var = tk.StringVar()
-
-        # Botão principal (texto selecionado)
-        self._btn = tk.Button(
-            self, textvariable=self._var,
-            bg="#252525", fg="#FFFFFF",
-            font=("Segoe UI", 9),
-            activebackground="#333333", activeforeground="#FFFFFF",
-            bd=0, relief="flat", anchor="w", cursor="hand2",
-            command=self._toggle_popup
-        )
-        self._btn.pack(side="left", fill="both", expand=True, padx=(6, 0), pady=2)
-
-        # Botão seta
-        self._arrow = tk.Button(
-            self, text="▾", width=2,
-            bg="#252525", fg="#666666",
-            font=("Segoe UI", 10),
-            activebackground="#333333",
-            bd=0, relief="flat", cursor="hand2",
-            command=self._toggle_popup
-        )
-        self._arrow.pack(side="right", padx=(0, 4), pady=2)
-
-        if self._values:
-            self._var.set(self._values[0])
-
-    # ── Popup ────────────────────────────────────────────────────────────────
-
-    def _toggle_popup(self):
-        if self._state == "disabled":
-            return
-        if self._popup and self._popup.winfo_exists():
-            self._close_popup()
-            return
-        self._show_popup()
-
-    def _show_popup(self):
-        # Posiciona o popup logo abaixo do widget
-        self.update_idletasks()
-        x = self.winfo_rootx()
-        y = self.winfo_rooty() + self.winfo_height()
-        w = self.winfo_width()
-        row_h = 24
-        max_rows = min(10, len(self._values))
-        h = max_rows * row_h + 4
-
-        self._popup = tk.Toplevel()
-        self._popup.wm_overrideredirect(True)   # sem barra de título
-        self._popup.attributes("-topmost", True)  # SEMPRE sobre tudo (VR overlay)
-        self._popup.geometry(f"{w}x{h}+{x}+{y}")
-        self._popup.configure(bg="#1E1E1E",
-                              highlightbackground="#4C8BF5",
-                              highlightthickness=1)
-
-        sb = tk.Scrollbar(self._popup, orient="vertical",
-                          bg="#333333", troughcolor="#1E1E1E", width=10,
-                          relief="flat")
-        self._lb = tk.Listbox(
-            self._popup,
-            bg="#1E1E1E", fg="#FFFFFF",
-            selectbackground="#4C8BF5", selectforeground="#FFFFFF",
-            font=("Segoe UI", 9),
-            bd=0, highlightthickness=0,
-            activestyle="none",
-            yscrollcommand=sb.set
-        )
-        sb.config(command=self._lb.yview)
-        sb.pack(side="right", fill="y")
-        self._lb.pack(side="left", fill="both", expand=True)
-
-        for v in self._values:
-            self._lb.insert("end", " " + v)
-
-        if 0 <= self._current_idx < len(self._values):
-            self._lb.selection_set(self._current_idx)
-            self._lb.see(self._current_idx)
-
-        self._lb.bind("<ButtonRelease-1>", self._on_select)
-        self._lb.bind("<Return>", self._on_select)
-        self._lb.bind("<Escape>", lambda e: self._close_popup())
-
-        # Fecha ao perder foco
-        self._popup.bind("<FocusOut>", self._on_focus_out)
-        self._popup.focus_force()
-        self._lb.focus_set()
-
-    def _on_focus_out(self, event):
-        # Pequeno delay para não fechar antes de processar o clique
-        self._popup.after(100, self._close_popup)
-
-    def _on_select(self, event=None):
-        sel = self._lb.curselection()
-        if sel:
-            self._current_idx = sel[0]
-            self._var.set(self._values[self._current_idx])
-        self._close_popup()
-
-    def _close_popup(self):
-        try:
-            if self._popup and self._popup.winfo_exists():
-                self._popup.destroy()
-        except Exception:
-            pass
-        self._popup = None
-
-    # ── API compatível com ttk.Combobox ──────────────────────────────────────
-
-    def get(self):
-        return self._var.get()
-
-    def current(self, idx=None):
-        if idx is None:
-            return self._current_idx
-        self._current_idx = max(0, min(idx, len(self._values) - 1))
-        if self._values:
-            self._var.set(self._values[self._current_idx])
-
-    def __setitem__(self, key, value):
-        if key == "values":
-            self._values = list(value)
-            if self._values:
-                self._var.set(self._values[self._current_idx]
-                              if self._current_idx < len(self._values)
-                              else self._values[0])
-        else:
-            super().__setitem__(key, value)
-
-    def __getitem__(self, key):
-        if key == "values":
-            return self._values
-        return super().__getitem__(key)
-
-    def config(self, **kwargs):
-        state = kwargs.pop("state", None)
-        if state == "disabled":
-            self._state = "disabled"
-            self._btn.config(state="disabled", fg="#444444", cursor="")
-            self._arrow.config(state="disabled", fg="#444444", cursor="")
-        elif state == "normal":
-            self._state = "normal"
-            self._btn.config(state="normal", fg="#FFFFFF", cursor="hand2")
-            self._arrow.config(state="normal", fg="#666666", cursor="hand2")
-        if kwargs:
-            super().config(**kwargs)
+def _same_device_name(name_a: str, name_b: str) -> bool:
+    """Compara nomes de dispositivo tolerando truncamento (MME limita a ~31
+    caracteres enquanto DirectSound/WASAPI expõem o nome completo do MESMO
+    aparelho) — usado tanto na deduplicacao da lista quanto ao restaurar o
+    dispositivo salvo em settings.json, pra nao perder a selecao so porque
+    o Windows reenumerou o dispositivo com uma variante de nome diferente."""
+    a, b = name_a.strip(), name_b.strip()
+    shorter, longer = (a, b) if len(a) <= len(b) else (b, a)
+    return len(shorter) >= 8 and longer.lower().startswith(shorter.lower())
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-#  App principal
-# ─────────────────────────────────────────────────────────────────────────────
-class App:
-    def __init__(self, root):
-        self.root = root
-        self.root.title("Translator By: LeNinjaMK")
-        self.root.geometry("420x800")
-        self.root.resizable(False, False)
-        self.root.configure(bg="#181818")
+class MainWindow(QWidget):
+    status_signal = Signal(str, str)
+    received_status_signal = Signal(str, str)
+    received_translation_signal = Signal(object)
+    level_signal = Signal(float)
+    test_result_signal = Signal(object, object)
+    mute_changed_signal = Signal(bool)
+    device_change_signal = Signal()
 
+    def __init__(self):
+        super().__init__()
         self.running = False
+        self.mic_index = None
+        self._animating = False
+        self._active_anim = None
+        self._vrchat_muted = False
 
+        self.setWindowTitle("VRChat Speech Translator — By: LeNinjaMK")
+        self.setStyleSheet(STYLESHEET)
+
+        self.status_signal.connect(self._set_status)
+        self.received_status_signal.connect(self._set_received_status)
+        self.received_translation_signal.connect(self._handle_received_translation)
+        self.level_signal.connect(self._on_level_changed)
+        self.test_result_signal.connect(self._on_test_result)
+        self.mute_changed_signal.connect(self._on_mute_changed)
+        self.device_change_signal.connect(self._on_loopback_devices_changed)
+
+        self._settings = load_settings()
+        self.panel_open = bool(self._settings.get("panel_open", False))
+        self.settings_open = bool(self._settings.get("settings_open", False))
+
+        self.speaker_service = SpeakerRecognitionService()
+        self.speaker_service.on_speech_started = lambda: self.received_status_signal.emit(*RECEIVED_STATUS_SPEECH)
+        self.speaker_service.on_speech_ended = lambda: self.received_status_signal.emit(*RECEIVED_STATUS_LISTENING)
+        self.speaker_service.on_transcription_ready = lambda text: self.received_status_signal.emit(*RECEIVED_STATUS_TRANSLATING)
+        self.speaker_service.on_translation_ready = lambda result: self.received_translation_signal.emit(result)
+        self.speaker_service.on_error = lambda msg, fatal: self._on_speaker_error(msg, fatal)
+        self.speaker_service.on_level_changed = lambda level: self.level_signal.emit(level)
+        self.speaker_service.on_test_result = lambda text, err: self.test_result_signal.emit(text, err)
+
+        self.osc_receiver = VRChatOSCReceiver()
+        self.osc_receiver.on_mute_changed = lambda muted: self.mute_changed_signal.emit(muted)
+        self.osc_receiver.on_error = lambda msg: self.status_signal.emit(msg, WARNING)
+
+        self.device_monitor = LoopbackDeviceMonitor(poll_interval=4.0)
+        self.device_monitor.on_change = lambda: self.device_change_signal.emit()
+        self.device_monitor.start()
+
+        self.overlay_mgr = overlay_manager
+        self.overlay_mgr.set_desktop_backend(DesktopOverlayWindow())
+        self.overlay_mgr.set_openvr_backend(OpenVROverlayBackend())
+
+        # engine separado pra TTS da fala RECEBIDA — precisa poder apontar pro
+        # meu fone/headset real, diferente do "Saída do TTS" da minha propria
+        # fala (que normalmente aponta pro VB-Cable, indo pro VRChat).
+        self.received_tts_engine = received_tts_engine
+
+        self._enumerate_audio_devices()
+        self._build_ui()
+        self._setup_shortcuts()
+        self._finalize_initial_size()
+        self._restore_window_position()
+        self._current_pos = self.pos()
+
+    # ── construcao da UI ─────────────────────────────────────────────────
+
+    def _build_ui(self):
+        root = QVBoxLayout(self)
+        root.setContentsMargins(ROOT_MARGIN_H, 12, ROOT_MARGIN_H, 12)
+        root.setSpacing(10)
+
+        root.addLayout(self._build_header())
+
+        body = QHBoxLayout()
+        body.setSpacing(PANEL_SPACING)
+
+        # Ordem da esquerda pra direita: [config. da fala recebida] [controles
+        # principais] [conversa]. A janela ancora a borda DIREITA — entao o
+        # painel de configuracoes, sendo o primeiro (mais a esquerda), sempre
+        # aparece "abrindo pra esquerda" sem deslocar os controles principais
+        # nem a conversa (eles ficam exatamente onde estavam).
+        self.settings_panel = self._build_settings_panel()
+        self.settings_panel.setVisible(False)
+        body.addWidget(self.settings_panel, 0)
+
+        body.addWidget(self._build_left_panel(), 0)
+
+        self.history_panel = HistoryPanel()
+        # comeca sempre oculto; _finalize_initial_size() decide o estado inicial
+        # depois que a geometria compacta ja estiver assentada (evita reflow com o
+        # painel direito "fantasma", sem largura, quando a janela abre ja expandida)
+        self.history_panel.setVisible(False)
+        self.history_panel.closeRequested.connect(self._close_conversation_panel)
+        self.history_panel.replayEntryRequested.connect(self._replay_entry)
+        body.addWidget(self.history_panel, 1)
+
+        root.addLayout(body, 1)
+
+    def _build_header(self):
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 8, 0, 8)
+
+        logo = QLabel("VR")
+        logo.setFixedSize(44, 44)
+        logo.setAlignment(Qt.AlignCenter)
+        logo.setStyleSheet(
+            f"background-color: {ACCENT}; border-radius: 12px; "
+            f"color: white; font-weight: 800; font-size: 12pt;"
+        )
+        row.addWidget(logo)
+
+        title_box = QVBoxLayout()
+        title_box.setSpacing(0)
+        title_box.setContentsMargins(12, 0, 0, 0)
+        title = QLabel("VRChat Speech Translator")
+        title.setStyleSheet("font-size: 16pt; font-weight: 800; background: transparent;")
+        subtitle = QLabel("By: LeNinjaMK")
+        subtitle.setStyleSheet(f"color: {ACCENT}; font-size: 9pt; font-weight: 700; background: transparent;")
+        title_box.addWidget(title)
+        title_box.addWidget(subtitle)
+        row.addLayout(title_box)
+
+        row.addStretch(1)
+
+        # O status global so aparece com a janela expandida (no modo compacto o
+        # espaco e curto demais para caber ao lado do titulo sem espremer o texto;
+        # o painel de conversa ja tem seu proprio indicador de estado).
+        self.header_status = StatusIndicator(STATUS_STOPPED)
+        self.header_status.setVisible(self.panel_open)
+        row.addWidget(self.header_status)
+
+        return row
+
+    def _build_left_panel(self):
+        # Container simples, SEM QScrollArea: a altura da janela e calculada a
+        # partir do sizeHint real deste container (ver _finalize_initial_size),
+        # entao nunca falta espaco e nunca aparece barra de rolagem.
+        container = QWidget()
+        container.setFixedWidth(LEFT_PANEL_WIDTH)
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(5)
+
+        layout.addWidget(self._build_audio_card())
+        layout.addWidget(self._build_language_card())
+        layout.addWidget(self._build_voice_card())
+        layout.addWidget(self._build_features_card())
+        layout.addLayout(self._build_action_buttons())
+
+        self.left_container = container
+        return container
+
+    def _row_label(self, text):
+        lbl = QLabel(text)
+        lbl.setObjectName("RowLabel")
+        return lbl
+
+    @staticmethod
+    def _initial_received_langs(settings):
+        codes = settings.get("received_langs")
+        if isinstance(codes, list) and codes:
+            valid = [c for c in codes if c in CODE_TO_LANG_NAME]
+            if valid:
+                return valid
+        # migracao de um settings.json antigo (received_lang = um unico nome de exibicao)
+        legacy_name = settings.get("received_lang")
+        if legacy_name in LANGS and LANGS[legacy_name] != "auto":
+            return [LANGS[legacy_name]]
+        return list(DEFAULT_RECEIVED_LANGS)
+
+    def _build_received_lang_checklist(self, content, selected_codes):
+        """Lista de checkboxes (2 colunas) pra marcar quais linguas tentar
+        reconhecer na fala recebida. Fica dentro de uma altura fixa+scroll
+        LOCAL (so essa lista, nao a janela toda) pra nunca fazer o painel de
+        configuracoes crescer alem da altura fixa da janela, mesmo com as
+        {n} linguas suportadas todas visiveis na lista.""".format(n=len(RECEIVED_LANG_ITEMS))
+        scroll = QScrollArea()
+        scroll.setObjectName("LangChecklist")
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setFixedHeight(168)
+
+        inner = QWidget()
+        grid = QGridLayout(inner)
+        grid.setContentsMargins(2, 2, 2, 2)
+        grid.setHorizontalSpacing(6)
+        grid.setVerticalSpacing(2)
+
+        self.received_lang_checks = {}
+        cols = 2
+        for i, (name, code) in enumerate(RECEIVED_LANG_ITEMS):
+            cb = QCheckBox(name)
+            cb.setObjectName("LangCheck")
+            cb.setCursor(Qt.PointingHandCursor)
+            cb.setChecked(code in selected_codes)
+            cb.toggled.connect(self._on_received_lang_check_toggled)
+            self.received_lang_checks[code] = cb
+            grid.addWidget(cb, i // cols, i % cols)
+
+        scroll.setWidget(inner)
+        content.addWidget(scroll)
+
+    def _selected_received_langs(self):
+        # RECEIVED_LANG_ITEMS define a ordem = prioridade de tentativa
+        return [code for code, cb in self.received_lang_checks.items() if cb.isChecked()]
+
+    def _on_received_lang_check_toggled(self, _checked):
+        self._persist_settings()
+
+    def _build_labeled_slider(self, content, label_text, min_v, max_v, default_v, tooltip=None, value_fmt=None):
+        value_fmt = value_fmt or (lambda v: str(v))
+        row = QHBoxLayout()
+        row.addWidget(self._row_label(label_text))
+        row.addStretch(1)
+        value_lbl = QLabel(value_fmt(default_v))
+        value_lbl.setStyleSheet(f"color: {ACCENT}; font-weight: 700; background: transparent;")
+        row.addWidget(value_lbl)
+        content.addLayout(row)
+
+        slider = QSlider(Qt.Horizontal)
+        slider.setRange(min_v, max_v)
+        slider.setValue(default_v)
+        if tooltip:
+            slider.setToolTip(tooltip)
+        slider.valueChanged.connect(lambda v: value_lbl.setText(value_fmt(v)))
+        content.addWidget(slider)
+        return slider
+
+    def _enumerate_audio_devices(self):
+        """Popula self.inputs/self.outputs — chamado uma unica vez em
+        __init__, ANTES de construir qualquer painel, pra estar disponivel
+        tanto pro painel de configuracoes quanto pro painel esquerdo.
+
+        No Windows, o PortAudio expõe cada dispositivo FISICO separadamente
+        por API de audio (MME, DirectSound, WASAPI, WDM-KS) — o mesmo
+        aparelho aparecia varias vezes na lista, com nomes truncados/
+        diferentes conforme a API. A tentativa anterior de resolver isso
+        filtrando SO WASAPI causou uma regressao seria: pelo menos um
+        dispositivo real (Fifine K420) reporta um defaultSampleRate ERRADO
+        na variante WASAPI (16000Hz) contra o correto na variante MME
+        (44100Hz) — usar a variante WASAPI deixou o reconhecimento de fala
+        muito pior (audio mal amostrado). Entao agora: mantemos MME/
+        DirectSound/WASAPI (nessa ordem de preferencia — MME primeiro, que e
+        historicamente o mais compativel) e so excluimos WDM-KS (a API de
+        acesso EXCLUSIVO, que falha se outro programa ja estiver usando o
+        dispositivo). A deduplicacao reconhece nomes truncados entre APIs
+        (ex: "Realtek Digital Output (Realtek" e "Realtek Digital Output
+        (Realtek(R) Audio)" sao o MESMO aparelho) via prefixo, mantendo
+        sempre a PRIMEIRA variante encontrada (MME, comprovadamente
+        funcional) em vez de arriscar outra API com comportamento diferente.
+        """
         devices = sd.query_devices()
-        settings = load_settings()
+        hostapis = sd.query_hostapis()
+        excluded_hostapis = [i for i, h in enumerate(hostapis) if "wdm-ks" in h["name"].lower()]
 
-        lbl_opts = {"bg": "#181818", "fg": "#CCCCCC", "font": ("Segoe UI", 9, "bold")}
+        def _collect(channel_key):
+            result = []
+            for i, d in enumerate(devices):
+                if d["hostapi"] in excluded_hostapis or d[channel_key] <= 0:
+                    continue
+                name = d["name"]
+                if any(_same_device_name(name, existing) for _, existing in result):
+                    continue
+                result.append((i, name))
+            return result
 
-        # ── Título ───────────────────────────────────────────────────────────
-        title_frame = tk.Frame(root, bg="#181818")
-        title_frame.pack(pady=(20, 5))
-        tk.Label(title_frame, text="VRChat Speech",
-                 font=("Segoe UI", 22, "bold"), bg="#181818", fg="#FFFFFF").pack()
-        tk.Label(title_frame, text="By: LeNinjaMK",
-                 font=("Segoe UI", 10, "bold"), bg="#181818", fg="#4C8BF5").pack()
+        self.inputs = _collect("max_input_channels")
+        self.outputs = _collect("max_output_channels")
 
-        tk.Label(root, text="Fale claramente e evite fontes de ruído de fundo.",
-                 font=("Segoe UI", 9, "italic"), bg="#181818", fg="#888888").pack(pady=(0, 15))
+    def _build_audio_card(self):
+        card, content = make_card("Dispositivos de Áudio")
+        settings = self._settings
 
-        # ── Microfone (INPUT) ─────────────────────────────────────────────────
-        tk.Label(root, text="Dispositivo de entrada (Microfone):", **lbl_opts).pack(anchor="w", padx=30, pady=(5, 2))
-        _seen_in = set()
-        self.inputs = []
-        for i, d in enumerate(devices):
-            if d["max_input_channels"] > 0 and d["name"] not in _seen_in:
-                _seen_in.add(d["name"])
-                self.inputs.append((i, d["name"]))
-
-        self.mic = VRCombobox(root, width=45)
-        self.mic["values"] = [f"{i} - {n}" for i, n in self.inputs]
+        content.addWidget(self._row_label("Microfone (reconhece minha fala)"))
+        self.mic = ModernCombo(self, values=[f"{i} - {n}" for i, n in self.inputs])
+        content.addWidget(self.mic)
         default_mic_idx = 0
         if "mic" in settings:
             for idx, (_, name) in enumerate(self.inputs):
-                if name == settings["mic"]:
+                if _same_device_name(name, settings["mic"]):
                     default_mic_idx = idx
                     break
         if self.inputs:
-            self.mic.current(default_mic_idx)
-        self.mic.pack(padx=30, fill="x", ipady=3)
+            self.mic.setCurrentIndex(default_mic_idx)
 
-        # ── Idioma de origem ─────────────────────────────────────────────────
-        tk.Label(root, text="Idioma de origem:", **lbl_opts).pack(anchor="w", padx=30, pady=(12, 2))
-        from_langs_list = list(LANGS.keys())
-        self.from_lang = VRCombobox(root, width=45, values=from_langs_list)
-        default_from_idx = 1
-        if "from_lang" in settings and settings["from_lang"] in from_langs_list:
-            default_from_idx = from_langs_list.index(settings["from_lang"])
-        self.from_lang.current(default_from_idx)
-        self.from_lang.pack(padx=30, fill="x", ipady=3)
-
-        # ── Idioma de destino ────────────────────────────────────────────────
-        tk.Label(root, text="Idioma de destino:", **lbl_opts).pack(anchor="w", padx=30, pady=(12, 2))
-        to_langs_list = [k for k in LANGS.keys() if k != "Auto Detect"]
-        self.to_lang = VRCombobox(root, width=45, values=to_langs_list)
-        default_to_idx = 0
-        if "to_lang" in settings and settings["to_lang"] in to_langs_list:
-            default_to_idx = to_langs_list.index(settings["to_lang"])
-        self.to_lang.current(default_to_idx)
-        self.to_lang.pack(padx=30, fill="x", ipady=3)
-
-        # ── Voice Pitch ──────────────────────────────────────────────────────
-        tk.Label(root, text="Voice Pitch (Tom de Voz):", **lbl_opts).pack(anchor="w", padx=30, pady=(15, 2))
-        slider_frame = tk.Frame(root, bg="#181818")
-        slider_frame.pack(fill="x", padx=30)
-        tk.Label(slider_frame, text="Grave", bg="#181818", fg="#777777",
-                 font=("Segoe UI", 8, "bold")).pack(side="left")
-        self.pitch_scale = tk.Scale(slider_frame, from_=-50, to=50, orient=tk.HORIZONTAL,
-                                    bg="#181818", fg="#FFFFFF", highlightthickness=0,
-                                    troughcolor="#252525", activebackground="#4C8BF5",
-                                    showvalue=True, bd=0)
-        self.pitch_scale.set(0)
-        self.pitch_scale.pack(side="left", fill="x", expand=True, padx=8)
-        tk.Label(slider_frame, text="Agudo", bg="#181818", fg="#777777",
-                 font=("Segoe UI", 8, "bold")).pack(side="right")
-
-        # ── Saída de áudio (OUTPUT) ──────────────────────────────────────────
-        tk.Label(root, text="Dispositivo de saída (VB-Cable / Headset):", **lbl_opts).pack(anchor="w", padx=30, pady=(12, 2))
-        _seen_out = set()
-        self.outputs = []
-        for i, d in enumerate(devices):
-            if d["max_output_channels"] > 0 and d["name"] not in _seen_out:
-                _seen_out.add(d["name"])
-                self.outputs.append((i, d["name"]))
-
-        self.out = VRCombobox(root, width=45)
-        self.out["values"] = [f"{i} - {n}" for i, n in self.outputs]
+        content.addWidget(self._row_label("Saída do TTS (VB-Cable / Headset)"))
+        self.output = ModernCombo(self, values=[f"{i} - {n}" for i, n in self.outputs])
+        content.addWidget(self.output)
         default_out_idx = 0
         if "out" in settings:
             for idx, (_, name) in enumerate(self.outputs):
-                if name == settings["out"]:
+                if _same_device_name(name, settings["out"]):
                     default_out_idx = idx
                     break
         if self.outputs:
-            self.out.current(default_out_idx)
-        self.out.pack(padx=30, fill="x", ipady=3)
+            self.output.setCurrentIndex(default_out_idx)
 
-        # Espaçador
-        tk.Frame(root, height=10, bg="#181818").pack()
+        card.setMinimumHeight(135)
+        return card
 
-        # ── Botão START ──────────────────────────────────────────────────────
-        self.btn_start = tk.Button(root, text="START LISTENING",
-                                   command=self.toggle_service,
-                                   bg="#252525", fg="#FFFFFF",
-                                   font=("Segoe UI", 11, "bold"),
-                                   activebackground="#333333", activeforeground="#FFFFFF",
-                                   bd=0, relief="flat", height=2, cursor="hand2")
-        self.btn_start.pack(padx=30, fill="x", pady=(15, 8))
+    def _build_language_card(self):
+        card, content = make_card("Idiomas")
+        settings = self._settings
 
-        # ── Botão Clear Chatbox ──────────────────────────────────────────────
-        self.btn_clear = tk.Button(root, text="Clear Chatbox text",
-                                   command=self.clear_chatbox,
-                                   bg="#1F1F1F", fg="#888888", font=("Segoe UI", 9),
-                                   activebackground="#252525", activeforeground="#CCCCCC",
-                                   bd=0, relief="flat", height=1, cursor="hand2")
-        self.btn_clear.pack(padx=30, fill="x", pady=(0, 6))
+        from_list = list(LANGS.keys())
+        to_list = [k for k in LANGS.keys() if k != "Auto Detect"]
 
-        # ── Checkbox Beep ────────────────────────────────────────────────────
-        self.beep_var = tk.BooleanVar(value=settings.get("beep", True))
-        beep_frame = tk.Frame(root, bg="#181818")
-        beep_frame.pack(padx=30, fill="x", pady=(0, 6))
-        tk.Checkbutton(
-            beep_frame, text="✔ Som de aviso ao reconhecer fala",
-            variable=self.beep_var,
-            bg="#181818", fg="#888888",
-            activebackground="#181818", activeforeground="#CCCCCC",
-            selectcolor="#252525",
-            font=("Segoe UI", 9), anchor="w", cursor="hand2"
-        ).pack(side="left")
+        content.addWidget(self._row_label("Origem (meu idioma)"))
+        self.from_lang = ModernCombo(self, values=from_list)
+        default_from_idx = 1
+        if settings.get("from_lang") in from_list:
+            default_from_idx = from_list.index(settings["from_lang"])
+        self.from_lang.setCurrentIndex(default_from_idx)
+        content.addWidget(self.from_lang)
 
-        # ── Toggle Buttons: TTS / Chatbox / Dual Language ────────────────────
-        tk.Label(root, text="Ativar / Desativar recursos:",
-                 bg="#181818", fg="#555555",
-                 font=("Segoe UI", 8)).pack(anchor="w", padx=30, pady=(4, 2))
+        swap_row = QHBoxLayout()
+        swap_row.addStretch(1)
+        self.swap_btn = QPushButton("↔  Trocar")
+        self.swap_btn.setObjectName("Ghost")
+        self.swap_btn.setCursor(Qt.PointingHandCursor)
+        self.swap_btn.setFixedHeight(30)
+        self.swap_btn.setToolTip("Troca os idiomas de origem e destino")
+        self.swap_btn.clicked.connect(self._swap_languages)
+        swap_row.addWidget(self.swap_btn)
+        swap_row.addStretch(1)
+        content.addLayout(swap_row)
 
-        toggles_frame = tk.Frame(root, bg="#181818")
-        toggles_frame.pack(padx=30, fill="x", pady=(0, 8))
+        content.addWidget(self._row_label("Destino (idioma de quem me ouve)"))
+        self.to_lang = ModernCombo(self, values=to_list)
+        default_to_idx = 0
+        if settings.get("to_lang") in to_list:
+            default_to_idx = to_list.index(settings["to_lang"])
+        self.to_lang.setCurrentIndex(default_to_idx)
+        content.addWidget(self.to_lang)
 
-        self.tts_var       = tk.BooleanVar(value=settings.get("tts_voice", True))
-        self.chatbox_var   = tk.BooleanVar(value=settings.get("chatbox",   True))
-        self.dual_lang_var = tk.BooleanVar(value=settings.get("dual_lang", True))
+        card.setMinimumHeight(190)
+        return card
 
-        _A_BG, _A_FG = "#12334D", "#4C8BF5"
-        _I_BG, _I_FG = "#1E1E1E", "#444444"
+    def _swap_languages(self):
+        current_from = self.from_lang.currentText()
+        current_to = self.to_lang.currentText()
+        if current_from == "Auto Detect":
+            return
+        self.from_lang.setCurrentText(current_to)
+        self.to_lang.setCurrentText(current_from)
 
-        def _make_toggle(parent, text, var):
-            btn = tk.Button(
-                parent, text=text,
-                bg=_A_BG if var.get() else _I_BG,
-                fg=_A_FG if var.get() else _I_FG,
-                font=("Segoe UI", 8, "bold"),
-                activebackground="#252525", activeforeground="#CCCCCC",
-                bd=0, relief="flat", cursor="hand2", pady=6
+    def _build_voice_card(self):
+        card, content = make_card("Voz")
+
+        self.pitch_slider = self._build_labeled_slider(
+            content, "Pitch (tom de voz)", -50, 50, 0,
+            tooltip="Ajusta o tom da voz sintetizada (grave a agudo)",
+        )
+        hint_row = QHBoxLayout()
+        grave = QLabel("Grave")
+        grave.setObjectName("RowHint")
+        agudo = QLabel("Agudo")
+        agudo.setObjectName("RowHint")
+        hint_row.addWidget(grave)
+        hint_row.addStretch(1)
+        hint_row.addWidget(agudo)
+        content.addLayout(hint_row)
+
+        card.setMinimumHeight(115)
+        return card
+
+    def _toggle_row(self, content, icon_text, label_text, checked, tooltip=None):
+        row = QHBoxLayout()
+        lbl = QLabel(f"{icon_text}  {label_text}")
+        lbl.setObjectName("RowLabel")
+        row.addWidget(lbl)
+        row.addStretch(1)
+        switch = ToggleSwitch(checked=checked)
+        if tooltip:
+            switch.setToolTip(tooltip)
+            lbl.setToolTip(tooltip)
+        row.addWidget(switch)
+        content.addLayout(row)
+        return switch
+
+    def _build_features_card(self):
+        card, content = make_card("Recursos")
+        settings = self._settings
+
+        self.beep_switch = self._toggle_row(
+            content, "🔔", "Som ao reconhecer fala", settings.get("beep", True),
+            "Toca um bipe no seu headset quando a fala é reconhecida",
+        )
+        self.tts_switch = self._toggle_row(
+            content, "🔊", "Voz (TTS)", settings.get("tts_voice", True),
+            "Fala a tradução em voz alta no dispositivo de saída selecionado",
+        )
+
+        content.addWidget(self._row_label("Envio ao Chatbox (minha fala)"))
+        self.chatbox_mode_combo = ModernCombo(self, values=CHATBOX_MODES)
+        default_mode = settings.get("chatbox_mode")
+        if default_mode not in CHATBOX_MODES:
+            # migracao de um settings.json antigo (chatbox bool + dual_lang bool)
+            if not settings.get("chatbox", True):
+                default_mode = CHATBOX_MODE_OFF
+            elif settings.get("dual_lang", True):
+                default_mode = CHATBOX_MODE_BOTH
+            else:
+                default_mode = CHATBOX_MODE_TRANSLATED
+        self.chatbox_mode_combo.setCurrentText(default_mode)
+        self.chatbox_mode_combo.setToolTip("O que enviar ao chatbox do VRChat quando EU falo")
+        content.addWidget(self.chatbox_mode_combo)
+
+        # So o essencial (toggle + status, numa unica linha) fica sempre
+        # visivel aqui. Tudo o resto (dispositivo, idioma, teste, overlay,
+        # mute sync) mora no PAINEL LATERAL (_build_settings_panel), que abre
+        # pra esquerda como um painel proprio — NUNCA aumenta a altura da
+        # janela, so a largura (mesmo mecanismo do painel de conversa).
+        divider = QLabel("FALA RECEBIDA")
+        divider.setObjectName("CardTitle")
+        content.addWidget(divider)
+
+        listen_row = QHBoxLayout()
+        listen_lbl = QLabel("🗣️  Ouvir outras pessoas")
+        listen_lbl.setObjectName("RowLabel")
+        listen_row.addWidget(listen_lbl)
+        listen_row.addStretch(1)
+        self._received_status_label = QLabel("● Parado")
+        self._received_status_label.setStyleSheet(
+            f"color: {TEXT_MUTED}; font-size: 8pt; font-weight: 600; background: transparent;"
+        )
+        listen_row.addWidget(self._received_status_label)
+        self.listen_others_switch = ToggleSwitch(checked=settings.get("listen_others", False))
+        self.listen_others_switch.setToolTip(
+            "Escuta o áudio que o VRChat está reproduzindo, reconhece e traduz a fala de outras pessoas"
+        )
+        listen_row.addWidget(self.listen_others_switch)
+        content.addLayout(listen_row)
+        self.listen_others_switch.toggled.connect(self._on_listen_others_toggled)
+        self._apply_listen_others(self.listen_others_switch.isChecked())
+
+        self.received_advanced_btn = QPushButton()
+        self.received_advanced_btn.setObjectName("Ghost")
+        self.received_advanced_btn.setCheckable(True)
+        self.received_advanced_btn.setCursor(Qt.PointingHandCursor)
+        self.received_advanced_btn.setFixedHeight(30)
+        self.received_advanced_btn.setToolTip("Idioma recebido, teste de áudio, overlay e sincronização de mute")
+        self.received_advanced_btn.setChecked(self.settings_open)
+        self._update_settings_button_text()
+        self.received_advanced_btn.toggled.connect(self._on_advanced_settings_toggled)
+        content.addWidget(self.received_advanced_btn)
+
+        card.setMinimumHeight(260)
+        return card
+
+    def _update_settings_button_text(self):
+        self.received_advanced_btn.setText("⚙  Ocultar configurações" if self.settings_open else "⚙  Mostrar configurações")
+
+    def _build_settings_panel(self):
+        """Painel lateral com tudo que e configurado uma vez e raramente
+        mexido de novo (dispositivo/idioma recebido, teste, overlay, mute
+        sync). Abre pra ESQUERDA (a janela ancora a borda direita e cresce),
+        nunca mexendo na altura da janela — resolve o problema de a janela
+        ficar mais alta que a tela."""
+        panel = QWidget()
+        panel.setFixedWidth(SETTINGS_PANEL_WIDTH)
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(10)
+        settings = self._settings
+
+        card, content = make_card("Fala Recebida — Config.")
+
+        content.addWidget(self._row_label("Áudio recebido (o que o VRChat reproduz)"))
+        self.loopback_devices = list_loopback_devices()
+        loopback_labels = [d.name for d in self.loopback_devices] or ["Nenhum dispositivo encontrado"]
+        self.received_device_combo = ModernCombo(self, values=loopback_labels)
+        content.addWidget(self.received_device_combo)
+        default_received = settings.get("received_device")
+        if not default_received or default_received not in loopback_labels:
+            default_dev = get_default_loopback_device()
+            if default_dev and default_dev.name in loopback_labels:
+                default_received = default_dev.name
+        if default_received in loopback_labels:
+            self.received_device_combo.setCurrentText(default_received)
+
+        content.addWidget(self._row_label("Idiomas candidatos (marque um ou mais)"))
+        self._build_received_lang_checklist(content, self._initial_received_langs(settings))
+
+        test_row = QHBoxLayout()
+        self.test_received_btn = QPushButton("🎚 Testar áudio recebido")
+        self.test_received_btn.setObjectName("Ghost")
+        self.test_received_btn.setCursor(Qt.PointingHandCursor)
+        self.test_received_btn.setFixedHeight(34)
+        self.test_received_btn.setToolTip("Grava alguns segundos, mostra o nível de áudio e tenta reconhecer uma frase (sem salvar nada em disco)")
+        self.test_received_btn.clicked.connect(self._on_test_received_clicked)
+        test_row.addWidget(self.test_received_btn)
+        content.addLayout(test_row)
+
+        self.received_level_meter = LevelMeter()
+        content.addWidget(self.received_level_meter)
+
+        self.received_tts_switch = self._toggle_row(
+            content, "🔊", "Também falar em voz alta (TTS)", settings.get("received_tts", False),
+            "Por padrão a fala recebida NÃO é reproduzida por voz — ative se quiser ouvir também",
+        )
+
+        content.addWidget(self._row_label("Saída da fala recebida (seu fone/headset — NUNCA o cabo virtual)"))
+        received_out_labels = [f"{i} - {n}" for i, n in self.outputs]
+        self.received_tts_output_combo = ModernCombo(self, values=received_out_labels)
+        self.received_tts_output_combo.setToolTip(
+            "Onde a TRADUÇÃO DO QUE OS OUTROS FALAM é tocada em voz. Use seu fone/headset "
+            "real (ou o áudio do VR) — se apontar pro mesmo cabo virtual da SUA fala, você "
+            "nunca ouve e o VRChat manda essa fala de volta pros outros como se fosse sua."
+        )
+        content.addWidget(self.received_tts_output_combo)
+        saved_received_out = settings.get("received_tts_output")
+        default_received_out = None
+        if saved_received_out:
+            saved_name = saved_received_out.split(" - ", 1)[1] if " - " in saved_received_out else saved_received_out
+            default_received_out = next(
+                (lbl for lbl in received_out_labels
+                 if _same_device_name(lbl.split(" - ", 1)[1] if " - " in lbl else lbl, saved_name)),
+                None,
             )
-            def _toggle(b=btn, v=var):
-                v.set(not v.get())
-                b.config(bg=_A_BG if v.get() else _I_BG,
-                         fg=_A_FG if v.get() else _I_FG)
-            btn.config(command=_toggle)
-            return btn
+        if not default_received_out:
+            # default sensato: primeiro dispositivo que NAO pareça ser um cabo virtual
+            non_cable = next((lbl for lbl in received_out_labels if "cable" not in lbl.lower()), None)
+            default_received_out = non_cable or (received_out_labels[0] if received_out_labels else None)
+        if default_received_out in received_out_labels:
+            self.received_tts_output_combo.setCurrentText(default_received_out)
+        self._apply_received_tts_output()
+        self.received_tts_output_combo.currentTextChanged.connect(self._on_received_tts_output_changed)
 
-        self.btn_tts_toggle = _make_toggle(toggles_frame, "🔊 TTS Voice", self.tts_var)
-        self.btn_tts_toggle.pack(side="left", expand=True, fill="x", padx=(0, 2))
+        card.setMinimumHeight(280)
+        layout.addWidget(card)
 
-        self.btn_chatbox_toggle = _make_toggle(toggles_frame, "💬 Chatbox", self.chatbox_var)
-        self.btn_chatbox_toggle.pack(side="left", expand=True, fill="x", padx=2)
+        overlay_card, overlay_content = make_card("Overlay & VRChat")
 
-        self.btn_dual_toggle = _make_toggle(toggles_frame, "🌐 Dual Lang", self.dual_lang_var)
-        self.btn_dual_toggle.pack(side="left", expand=True, fill="x", padx=(2, 0))
+        overlay_enabled = settings.get("overlay_enabled", False)
+        self.overlay_switch = self._toggle_row(
+            overlay_content, "🥽", "Ativar overlay da fala recebida", overlay_enabled,
+            "Mostra a tradução da fala recebida numa janela flutuante ou dentro do headset",
+        )
+        self.overlay_switch.toggled.connect(self._on_overlay_toggled)
 
-        # ── Status ───────────────────────────────────────────────────────────
-        self.status = tk.Label(root, text="Parado",
-                               font=("Segoe UI", 9), bg="#181818", fg="#666666")
-        self.status.pack(pady=8)
+        # Os ajustes finos do overlay so fazem sentido com ele ligado — ficam
+        # escondidos por padrao. Como este painel tem altura sobrando (o
+        # painel esquerdo principal e mais alto), mostrar/esconder isso aqui
+        # NUNCA precisa redimensionar a janela.
+        self.overlay_settings_box = QWidget()
+        overlay_settings_layout = QVBoxLayout(self.overlay_settings_box)
+        overlay_settings_layout.setContentsMargins(0, 0, 0, 0)
+        overlay_settings_layout.setSpacing(10)
+        self.overlay_settings_box.setVisible(overlay_enabled)
+        overlay_content.addWidget(self.overlay_settings_box)
 
-    # ─────────────────────────────────────────────────────────────────────────
+        overlay_settings_layout.addWidget(self._row_label("Tipo de overlay"))
+        self.overlay_backend_combo = ModernCombo(self, values=OVERLAY_BACKENDS)
+        saved_backend = settings.get("overlay_backend", OVERLAY_BACKEND_DESKTOP)
+        if saved_backend in OVERLAY_BACKENDS:
+            self.overlay_backend_combo.setCurrentText(saved_backend)
+        self.overlay_backend_combo.currentTextChanged.connect(lambda _t: self._apply_overlay_backend())
+        overlay_settings_layout.addWidget(self.overlay_backend_combo)
+
+        self.overlay_opacity_slider = self._build_labeled_slider(
+            overlay_settings_layout, "Opacidade do overlay", 20, 100, int(settings.get("overlay_opacity", 90)),
+            value_fmt=lambda v: f"{v}%",
+        )
+        self.overlay_opacity_slider.valueChanged.connect(lambda v: setattr(self.overlay_mgr, "opacity", v / 100.0))
+
+        self.overlay_duration_slider = self._build_labeled_slider(
+            overlay_settings_layout, "Tempo visível", 2, 30, int(settings.get("overlay_duration", 6)),
+            value_fmt=lambda v: f"{v}s",
+        )
+        self.overlay_duration_slider.valueChanged.connect(lambda v: setattr(self.overlay_mgr, "duration_seconds", float(v)))
+        self.overlay_duration_slider.setEnabled(not settings.get("overlay_always_visible", False))
+
+        self.overlay_always_visible_switch = self._toggle_row(
+            overlay_settings_layout, "♾️", "Sempre visível (não some sozinho)", settings.get("overlay_always_visible", False),
+        )
+        self.overlay_always_visible_switch.toggled.connect(self._on_overlay_always_visible_toggled)
+
+        self.overlay_font_slider = self._build_labeled_slider(
+            overlay_settings_layout, "Tamanho da fonte", 12, 36, int(settings.get("overlay_font_size", 20)),
+            value_fmt=lambda v: f"{v}pt",
+        )
+        self.overlay_font_slider.valueChanged.connect(lambda v: setattr(self.overlay_mgr, "font_size", v))
+
+        self.overlay_maxlines_slider = self._build_labeled_slider(
+            overlay_settings_layout, "Máximo de linhas", 1, 8, int(settings.get("overlay_max_lines", 4)),
+        )
+        self.overlay_maxlines_slider.valueChanged.connect(lambda v: setattr(self.overlay_mgr, "max_lines", v))
+
+        self.mute_sync_switch = self._toggle_row(
+            overlay_content, "🔇", "Sincronizar mute do VRChat", settings.get("mute_sync", False),
+            "Detecta quando meu microfone está mutado no VRChat (parâmetro OSC /avatar/parameters/MuteSelf)",
+        )
+        self.mute_sync_switch.toggled.connect(self._on_mute_sync_toggled)
+        self._apply_mute_sync(self.mute_sync_switch.isChecked())
+
+        self.mute_pause_mic_switch = self._toggle_row(
+            overlay_content, "⏸", "Pausar meu microfone quando mutado", settings.get("mute_pause_mic", False),
+            "Além de não enviar ao chatbox, para de escutar meu microfone enquanto eu estiver mutado (a fala recebida continua normalmente)",
+        )
+
+        # aplica valores iniciais no overlay_manager (os sliders acima so disparam
+        # o valueChanged quando o VALOR muda, entao os defaults precisam ser
+        # aplicados explicitamente aqui uma vez)
+        self.overlay_mgr.opacity = self.overlay_opacity_slider.value() / 100.0
+        self.overlay_mgr.duration_seconds = float(self.overlay_duration_slider.value())
+        self.overlay_mgr.always_visible = self.overlay_always_visible_switch.isChecked()
+        self.overlay_mgr.font_size = self.overlay_font_slider.value()
+        self.overlay_mgr.max_lines = self.overlay_maxlines_slider.value()
+        self.overlay_mgr.enabled = self.overlay_switch.isChecked()
+        self._apply_overlay_backend()
+
+        overlay_card.setMinimumHeight(280)
+        layout.addWidget(overlay_card)
+        layout.addStretch(1)
+
+        return panel
+
+    def _build_action_buttons(self):
+        col = QVBoxLayout()
+        col.setSpacing(8)
+
+        self.start_btn = QPushButton("INICIAR TRADUÇÃO")
+        self.start_btn.setCursor(Qt.PointingHandCursor)
+        self.start_btn.setStyleSheet(PRIMARY_BTN_QSS)
+        self.start_btn.setFixedHeight(47)
+        self.start_btn.setToolTip("Iniciar ou parar a tradução (Ctrl+Espaço)")
+        self.start_btn.clicked.connect(self.toggle_service)
+        col.addWidget(self.start_btn)
+
+        self.clear_btn = QPushButton("Limpar Chatbox do VRChat")
+        self.clear_btn.setObjectName("Ghost")
+        self.clear_btn.setCursor(Qt.PointingHandCursor)
+        self.clear_btn.setFixedHeight(39)
+        self.clear_btn.setToolTip("Envia uma mensagem vazia para limpar o chatbox atual do VRChat")
+        self.clear_btn.clicked.connect(self.clear_chatbox)
+        col.addWidget(self.clear_btn)
+
+        self.open_panel_btn = QPushButton()
+        self.open_panel_btn.setObjectName("Ghost")
+        self.open_panel_btn.setCursor(Qt.PointingHandCursor)
+        self.open_panel_btn.setFixedHeight(39)
+        self.open_panel_btn.setToolTip("Abrir ou fechar o painel de conversa (Ctrl+L)")
+        self.open_panel_btn.clicked.connect(self._toggle_conversation_panel)
+        col.addWidget(self.open_panel_btn)
+        self._update_panel_button_text()
+
+        return col
+
+    def _update_panel_button_text(self):
+        self.open_panel_btn.setText("◂  FECHAR CONVERSA" if self.panel_open else "▸  ABRIR CONVERSA")
+
+    # ── janela compacta / expansivel ────────────────────────────────────────
+
+    def _setup_shortcuts(self):
+        QShortcut(QKeySequence("Ctrl+L"), self, activated=self._toggle_conversation_panel)
+        QShortcut(QKeySequence("Ctrl+K"), self, activated=self.history_panel.clear)
+        QShortcut(QKeySequence("Ctrl+Space"), self, activated=self.toggle_service)
+        QShortcut(QKeySequence(Qt.Key_Escape), self, activated=self._close_conversation_panel)
+
+    def _current_target_width(self):
+        """Soma a largura compacta com a largura extra de cada painel que
+        estiver aberto no momento (configuracoes a esquerda, conversa a
+        direita) — a altura nunca entra nessa conta, ela e fixa desde
+        _finalize_initial_size()."""
+        width = COMPACT_WIDTH
+        if self.settings_open:
+            width += SETTINGS_WIDTH_DELTA
+        if self.panel_open:
+            width += CONVERSATION_WIDTH_DELTA
+        return width
+
+    def _finalize_initial_size(self):
+        # 1) assenta a geometria compacta primeiro (paineis extras ainda ocultos) —
+        #    a altura calculada aqui e DEFINITIVA e nunca mais muda em runtime.
+        self.settings_panel.setVisible(False)
+        self.history_panel.setVisible(False)
+        self.adjustSize()
+        height = self.height()
+        self.setFixedSize(COMPACT_WIDTH, height)
+        self._fixed_height = height
+        self._current_width = COMPACT_WIDTH
+        self._current_pos = self.pos()
+
+        # 2) se o usuario tinha deixado algum painel aberto na ultima sessao,
+        #    reaplica INSTANTANEAMENTE (sem animacao — so no primeiro show da
+        #    janela), ancorando pela borda direita do estado compacto acima.
+        if self.settings_open or self.panel_open:
+            if self.settings_open:
+                self.settings_panel.setVisible(True)
+            if self.panel_open:
+                self.history_panel.setVisible(True)
+            target_width = self._current_target_width()
+            right_edge = self._current_pos.x() + self._current_width
+            new_x = right_edge - target_width
+            self.setFixedSize(target_width, height)
+            self.move(new_x, self._current_pos.y())
+            self._current_width = target_width
+            self._current_pos = QPoint(new_x, self._current_pos.y())
+
+    def _restore_window_position(self):
+        x = self._settings.get("window_x")
+        y = self._settings.get("window_y")
+        if x is not None and y is not None:
+            point = QPoint(int(x), int(y))
+            for screen in QGuiApplication.screens():
+                if screen.availableGeometry().contains(point):
+                    self.move(point)
+                    return
+        # sem posicao salva (ou posicao fora de qualquer monitor): abre centralizada
+        self._center_on_screen()
+
+    def _center_on_screen(self):
+        screen = self.screen() or QGuiApplication.primaryScreen()
+        if not screen:
+            return
+        geo = screen.availableGeometry()
+        x = geo.x() + max((geo.width() - self.width()) // 2, 0)
+        y = geo.y() + max((geo.height() - self.height()) // 2, 0)
+        self.move(x, y)
+
+    def _toggle_conversation_panel(self):
+        if self._animating:
+            return
+        self._set_panel_open(not self.panel_open)
+
+    def _close_conversation_panel(self):
+        if self.panel_open and not self._animating:
+            self._set_panel_open(False)
+
+    def _set_panel_open(self, opening: bool):
+        self.panel_open = opening
+        self.header_status.setVisible(opening)
+        self._update_panel_button_text()
+        show_before = (lambda: self.history_panel.setVisible(True)) if opening else None
+        on_finished = None if opening else self._hide_history_panel
+        self._animate_to_width(self._current_target_width(), show_before=show_before, on_finished=on_finished)
+        self._persist_settings()
+
+    def _hide_history_panel(self):
+        self.history_panel.setVisible(False)
+
+    def _set_settings_open(self, opening: bool):
+        self.settings_open = opening
+        self._update_settings_button_text()
+        show_before = (lambda: self.settings_panel.setVisible(True)) if opening else None
+        on_finished = None if opening else self._hide_settings_panel
+        self._animate_to_width(self._current_target_width(), show_before=show_before, on_finished=on_finished)
+        self._persist_settings()
+
+    def _hide_settings_panel(self):
+        self.settings_panel.setVisible(False)
+
+    def _animate_to_width(self, target_width, show_before=None, on_finished=None):
+        """Anima a LARGURA da janela, ancorando a borda DIREITA (a janela
+        cresce/encolhe sempre pra ESQUERDA — quem estiver mais a direita no
+        layout, tipicamente a conversa, nunca se desloca; o painel de
+        configuracoes, por vir primeiro no layout, "aparece" nesse espaco
+        novo à esquerda sem deslocar o painel de controles principal).
+
+        Usa self._current_width/_current_pos (rastreados por nos mesmos) em
+        vez de ler self.geometry() diretamente: descobrimos que mostrar um
+        filho recem-visivel (setVisible(True)) pode fazer o Qt forcar um
+        reposicionamento/redimensionamento SINCRONO do layout quando o
+        sizeHint do conteudo passa a exigir mais espaco que o maximumSize
+        atual da janela — e isso corrompe silenciosamente a ancora se lermos
+        self.geometry() depois disso. show_before() so roda DEPOIS de
+        relaxarmos os limites de tamanho (setMinimumSize/setMaximumSize) pra
+        cobrir o intervalo [inicio, alvo], e a geometria e reimposta
+        explicitamente logo em seguida, entao qualquer ajuste automatico que
+        o Qt tente fazer nesse meio-tempo e sobrescrito.
+        """
+        start_width = self._current_width
+        if start_width == target_width:
+            if show_before:
+                show_before()
+            if on_finished:
+                on_finished()
+            return
+
+        right_edge = self._current_pos.x() + start_width
+        y = self._current_pos.y()
+        height = self._fixed_height
+
+        lo = min(start_width, target_width)
+        hi = max(start_width, target_width)
+        self.setMinimumSize(lo, height)
+        self.setMaximumSize(hi, height)
+
+        if show_before:
+            show_before()
+        self.setGeometry(right_edge - start_width, y, start_width, height)
+
+        self._animating = True
+        self.open_panel_btn.setEnabled(False)
+        self.received_advanced_btn.setEnabled(False)
+
+        anim = QVariantAnimation(self)
+        anim.setDuration(PANEL_ANIM_MS)
+        anim.setEasingCurve(QEasingCurve.InOutCubic)
+        anim.setStartValue(start_width)
+        anim.setEndValue(target_width)
+
+        def _apply(value):
+            w = int(value)
+            self.setGeometry(right_edge - w, y, w, height)
+
+        anim.valueChanged.connect(_apply)
+
+        def _finish():
+            final_x = right_edge - target_width
+            # se os dois paineis abertos ao mesmo tempo nao couberem mais na
+            # tela crescendo so pra esquerda (janela ficaria parcialmente fora
+            # da tela), abre mao da ancora exata e prende a borda esquerda no
+            # limite visivel do monitor — melhor ancora imperfeita que janela
+            # inacessivel atras da borda da tela.
+            screen = self.screen() or QGuiApplication.primaryScreen()
+            if screen:
+                min_x = screen.availableGeometry().x()
+                final_x = max(final_x, min_x)
+            self.setFixedSize(target_width, height)
+            self.move(final_x, y)
+            self._current_width = target_width
+            self._current_pos = QPoint(final_x, y)
+            self._animating = False
+            self.open_panel_btn.setEnabled(True)
+            self.received_advanced_btn.setEnabled(True)
+            if on_finished:
+                on_finished()
+
+        anim.finished.connect(_finish)
+        self._active_anim = anim
+        anim.start()
+
+    # ── persistencia ─────────────────────────────────────────────────────
+
+    def _persist_settings(self):
+        mic_text = self.mic.currentText()
+        out_text = self.output.currentText()
+        mic_name = mic_text.split(" - ", 1)[1] if " - " in mic_text else mic_text
+        out_name = out_text.split(" - ", 1)[1] if " - " in out_text else out_text
+        pos = self.pos()
+
+        self._settings = {
+            "mic": mic_name,
+            "out": out_name,
+            "from_lang": self.from_lang.currentText(),
+            "to_lang": self.to_lang.currentText(),
+            "beep": self.beep_switch.isChecked(),
+            "tts_voice": self.tts_switch.isChecked(),
+            "chatbox_mode": self.chatbox_mode_combo.currentText(),
+            "panel_open": self.panel_open,
+            "settings_open": self.settings_open,
+            "window_x": pos.x(),
+            "window_y": pos.y(),
+
+            "listen_others": self.listen_others_switch.isChecked(),
+            "received_device": self.received_device_combo.currentText(),
+            "received_langs": self._selected_received_langs(),
+            "received_tts": self.received_tts_switch.isChecked(),
+            "received_tts_output": self.received_tts_output_combo.currentText(),
+
+            "overlay_enabled": self.overlay_switch.isChecked(),
+            "overlay_backend": self.overlay_backend_combo.currentText(),
+            "overlay_opacity": self.overlay_opacity_slider.value(),
+            "overlay_duration": self.overlay_duration_slider.value(),
+            "overlay_always_visible": self.overlay_always_visible_switch.isChecked(),
+            "overlay_font_size": self.overlay_font_slider.value(),
+            "overlay_max_lines": self.overlay_maxlines_slider.value(),
+
+            "mute_sync": self.mute_sync_switch.isChecked(),
+            "mute_pause_mic": self.mute_pause_mic_switch.isChecked(),
+        }
+        save_settings(self._settings)
+
+    # ── logica de negocio — minha fala (fluxo 1, inalterado na essencia) ───
+
+    def _set_status(self, text, color):
+        self.header_status.set_status(text, color)
+        self.history_panel.set_status(text, color)
 
     def toggle_service(self):
         if not self.running:
             try:
-                mic_index = int(self.mic.get().split(" - ")[0])
-                out_index = int(self.out.get().split(" - ")[0])
-            except (IndexError, ValueError, AttributeError):
-                self.status.config(text="Erro: Selecione microfone e saída!", fg="#FF3333")
+                mic_index = int(self.mic.currentText().split(" - ")[0])
+                out_index = int(self.output.currentText().split(" - ")[0])
+            except (IndexError, ValueError):
+                self.status_signal.emit("Erro: selecione microfone e saída!", DANGER)
                 return
 
             engine.set_output_index(out_index)
             self.mic_index = mic_index
 
-            try:
-                mic_name = self.mic.get().split(" - ", 1)[1]
-            except IndexError:
-                mic_name = self.mic.get()
-            try:
-                out_name = self.out.get().split(" - ", 1)[1]
-            except IndexError:
-                out_name = self.out.get()
-
-            save_settings({
-                "mic":       mic_name,
-                "out":       out_name,
-                "from_lang": self.from_lang.get(),
-                "to_lang":   self.to_lang.get(),
-                "beep":      self.beep_var.get(),
-                "tts_voice": self.tts_var.get(),
-                "chatbox":   self.chatbox_var.get(),
-                "dual_lang": self.dual_lang_var.get()
-            })
-
-            self.status.config(text="Escutando...", fg="#4C8BF5")
-            self.btn_start.config(text="STOP LISTENING", bg="#A31D1D")
-            self.mic.config(state="disabled")
-            self.out.config(state="disabled")
+            self.status_signal.emit(*STATUS_STATES[STATUS_LISTENING])
+            self.start_btn.setText("PARAR TRADUÇÃO")
+            self.start_btn.setStyleSheet(DANGER_BTN_QSS)
+            self.mic.set_enabled(False)
+            self.output.set_enabled(False)
 
             self.running = True
+            self._persist_settings()
             threading.Thread(target=self.run_engine, daemon=True).start()
         else:
             self.running = False
-            self.status.config(text="Parando serviço...", fg="#FFA500")
-            self.btn_start.config(state="disabled", text="Aguarde...", bg="#333333")
+            self.status_signal.emit("Parando serviço...", WARNING)
+            self.start_btn.setEnabled(False)
+            self.start_btn.setText("Aguarde...")
+            QTimer.singleShot(1500, self._reenable)
 
-            def reenable():
-                self.btn_start.config(state="normal", text="START LISTENING", bg="#252525")
-                self.status.config(text="Parado", fg="#666666")
-                self.mic.config(state="normal")
-                self.out.config(state="normal")
-
-            self.root.after(1500, reenable)
+    def _reenable(self):
+        self.start_btn.setEnabled(True)
+        self.start_btn.setText("INICIAR TRADUÇÃO")
+        self.start_btn.setStyleSheet(PRIMARY_BTN_QSS)
+        self.status_signal.emit(*STATUS_STATES[STATUS_STOPPED])
+        self.mic.set_enabled(True)
+        self.output.set_enabled(True)
 
     def clear_chatbox(self):
         try:
             from core.osc import send_chat
             send_chat("")
-            self.status.config(text="Chatbox limpo!", fg="#4C8BF5")
+            self.status_signal.emit("Chatbox limpo!", ACCENT)
         except Exception as e:
-            self.status.config(text=f"Erro ao limpar: {e}", fg="#FF3333")
+            self.status_signal.emit(f"Erro ao limpar: {e}", DANGER)
+
+    def _replay_entry(self, entry: HistoryEntry):
+        text = entry.translated if (entry.category == CATEGORY_TRANSLATED and entry.translated) else entry.original
+        lang_code = entry.target_lang_code or LANGS.get(self.to_lang.currentText(), "en")
+        pitch = self.pitch_slider.value()
+        # fala RECEBIDA toca no dispositivo de fala recebida (meu fone/headset);
+        # minha propria fala toca no "Saída do TTS" de sempre (engine default)
+        engine_instance = self.received_tts_engine if entry.category == CATEGORY_RECEIVED else None
+        threading.Thread(
+            target=self._speak_async, args=(text, lang_code, pitch, engine_instance), daemon=True,
+        ).start()
+
+    @staticmethod
+    def _speak_async(text, lang_code, pitch, engine_instance=None):
+        from core.tts import speak
+        speak(text, lang_code, pitch, engine_instance=engine_instance)
+
+    def _is_chatbox_muted(self) -> bool:
+        return self.mute_sync_switch.isChecked() and self._vrchat_muted
 
     def run_engine(self):
         from core.speech_to_text import listen, adjust_noise
@@ -448,55 +1063,284 @@ class App:
         adjust_noise(self.mic_index)
 
         while self.running:
+            if (self.mute_sync_switch.isChecked() and self.mute_pause_mic_switch.isChecked()
+                    and self._vrchat_muted):
+                time.sleep(0.3)
+                continue
+
             try:
-                current_from = LANGS[self.from_lang.get()]
-            except KeyError:
-                current_from = "pt"
+                current_from = LANGS.get(self.from_lang.currentText(), "pt")
+                text = listen(self.mic_index, current_from)
 
-            text = listen(self.mic_index, current_from)
+                if not self.running:
+                    break
+                if not text:
+                    continue
 
-            if not self.running:
-                break
+                current_to_label = self.to_lang.currentText()
+                current_to = LANGS.get(current_to_label, "en")
+                current_pitch = self.pitch_slider.value()
+                source_lang_label = self.from_lang.currentText()
+                if source_lang_label == "Auto Detect":
+                    source_lang_label = None
 
-            if text:
-                try:
-                    current_to = LANGS[self.to_lang.get()]
-                except KeyError:
-                    current_to = "en"
-
-                current_pitch = self.pitch_scale.get()
-
-                # Beeps de feedback (só no headset, nunca no VB-Cable)
-                if self.beep_var.get():
+                if self.beep_switch.isChecked():
                     threading.Thread(target=beep_start, daemon=True).start()
                     threading.Thread(target=beep_done, daemon=True).start()
 
-                # Mesmo idioma → sem tradução
                 lang_from_code = current_from if current_from != "auto" else None
                 same_lang = (lang_from_code == current_to)
+                ts = time.strftime("%H:%M:%S")
+                muted = self._is_chatbox_muted()
+                mode = self.chatbox_mode_combo.currentText()
+                will_tts = self.tts_switch.isChecked()
 
                 if same_lang:
-                    print("Você:", text)
-                    print("(Sem tradução - mesmo idioma)")
-                    if self.chatbox_var.get():
+                    sent = False
+                    if not muted and mode != CHATBOX_MODE_OFF:
                         send_chat(text)
-                    if self.tts_var.get():
+                        sent = True
+                    self.history_panel.add_entry(HistoryEntry(
+                        timestamp=ts, category=CATEGORY_SAME_LANG, speaker="Você", source=SOURCE_LOCAL,
+                        original=text, source_language=source_lang_label,
+                        sent_to_chatbox=sent, tts_played=will_tts,
+                    ))
+                    if will_tts:
                         speak(text, current_to, current_pitch)
                 else:
+                    # revertido pra "auto" por pedido do usuario: passar a lingua
+                    # de origem explicita (lang_from_code) piorou a traducao da
+                    # MINHA fala pros outros — provavelmente porque "Origem (meu
+                    # idioma)" e uma escolha manual grosseira (nao verificada
+                    # contra o texto reconhecido, ao contrario do matched_language
+                    # da fala recebida, que passa por confirmacao via langdetect
+                    # quando ha 2+ candidatas). O auto-detect do Google Translate
+                    # direto no texto reconhecido deu resultado melhor aqui.
                     translated = translate(text, current_to)
-                    print("Você:", text)
-                    print("Traduzido:", translated)
+                    sent = False
+                    if not muted:
+                        if mode == CHATBOX_MODE_ORIGINAL:
+                            send_chat(text); sent = True
+                        elif mode == CHATBOX_MODE_TRANSLATED:
+                            send_chat(translated); sent = True
+                        elif mode == CHATBOX_MODE_BOTH:
+                            send_chat(f"({text}) → {translated}"); sent = True
 
-                    if self.chatbox_var.get():
-                        if self.dual_lang_var.get():
-                            send_chat(f"({text}) → {translated}")
-                        else:
-                            send_chat(translated)
-                    if self.tts_var.get():
+                    self.history_panel.add_entry(HistoryEntry(
+                        timestamp=ts, category=CATEGORY_TRANSLATED, speaker="Você", source=SOURCE_LOCAL,
+                        original=text, translated=translated,
+                        target_lang=current_to_label, target_lang_code=current_to,
+                        source_language=source_lang_label,
+                        sent_to_chatbox=sent, tts_played=will_tts,
+                    ))
+                    if will_tts:
                         speak(translated, current_to, current_pitch)
+            except Exception as e:
+                ts = time.strftime("%H:%M:%S")
+                self.history_panel.add_entry(HistoryEntry(
+                    timestamp=ts, category=CATEGORY_ERROR, speaker="Sistema", original=str(e),
+                ))
+                self.status_signal.emit(*STATUS_STATES[STATUS_ERROR])
+                time.sleep(0.5)
+
+    # ── logica de negocio — fala recebida (fluxo 2, independente) ──────────
+
+    def _get_selected_loopback_device(self):
+        label = self.received_device_combo.currentText()
+        return find_loopback_device_by_name(label) if label else None
+
+    def _on_advanced_settings_toggled(self, checked):
+        if checked == self.settings_open:
+            return
+        self._set_settings_open(checked)
+
+    def _set_received_langs_enabled(self, enabled: bool):
+        for cb in self.received_lang_checks.values():
+            cb.setEnabled(enabled)
+
+    def _apply_listen_others(self, checked):
+        if checked:
+            device = self._get_selected_loopback_device()
+            if device is None:
+                self.received_status_signal.emit("Selecione um dispositivo válido", DANGER)
+                self.listen_others_switch.setChecked(False)
+                return
+            candidates = self._selected_received_langs()
+            if not candidates:
+                self.received_status_signal.emit("Marque ao menos um idioma candidato", DANGER)
+                self.listen_others_switch.setChecked(False)
+                return
+            self.speaker_service.candidate_languages = candidates
+            self.speaker_service.target_language = LANGS.get(self.from_lang.currentText(), "pt")
+            self.speaker_service.start(device)
+            self.received_status_signal.emit(*RECEIVED_STATUS_LISTENING)
+            self.received_device_combo.set_enabled(False)
+            self._set_received_langs_enabled(False)
+            self.test_received_btn.setEnabled(False)
+        else:
+            self.speaker_service.stop()
+            self.received_status_signal.emit(*RECEIVED_STATUS_STOPPED)
+            self.received_device_combo.set_enabled(True)
+            self._set_received_langs_enabled(True)
+            self.test_received_btn.setEnabled(True)
+            self.received_level_meter.set_level(0.0)
+
+    def _on_listen_others_toggled(self, checked):
+        self._apply_listen_others(checked)
+        self._persist_settings()
+
+    def _set_received_status(self, text, color):
+        self._received_status_label.setText(f"● {text}")
+        self._received_status_label.setStyleSheet(
+            f"color: {color}; font-size: 8pt; font-weight: 600; background: transparent;"
+        )
+
+    def _on_speaker_error(self, message, fatal):
+        self.received_status_signal.emit(*RECEIVED_STATUS_ERROR)
+        ts = time.strftime("%H:%M:%S")
+        self.history_panel.add_entry(HistoryEntry(
+            timestamp=ts, category=CATEGORY_ERROR, speaker="Sistema (áudio recebido)", original=message,
+        ))
+        if fatal:
+            self.listen_others_switch.setChecked(False)
+
+    def _handle_received_translation(self, result):
+        ts = result.timestamp
+        entry = HistoryEntry(
+            timestamp=ts, category=CATEGORY_RECEIVED, speaker="Recebido", source=SOURCE_RECEIVED,
+            original=result.original_text, translated=result.translated_text,
+            source_language=CODE_TO_LANG_NAME.get(result.source_language, result.source_language),
+            target_lang=self.from_lang.currentText(), target_lang_code=result.target_language,
+        )
+        self.history_panel.add_entry(entry)
+        self.received_status_signal.emit(*RECEIVED_STATUS_LISTENING)
+
+        if self.overlay_switch.isChecked():
+            self.overlay_mgr.show_text(result.translated_text)
+
+        if self.received_tts_switch.isChecked():
+            pitch = self.pitch_slider.value()
+            threading.Thread(
+                target=self._speak_async,
+                args=(result.translated_text, result.target_language, pitch, self.received_tts_engine),
+                daemon=True,
+            ).start()
+
+    def _on_level_changed(self, level):
+        self.received_level_meter.set_level(level)
+
+    # ── teste de audio recebido ──────────────────────────────────────────
+
+    def _on_test_received_clicked(self):
+        if self.speaker_service.is_running():
+            self.status_signal.emit("Pare a escuta contínua antes de testar (evita 2 capturas ao mesmo tempo).", WARNING)
+            return
+        device = self._get_selected_loopback_device()
+        if device is None:
+            self.status_signal.emit("Selecione um dispositivo de áudio recebido válido.", DANGER)
+            return
+        candidates = self._selected_received_langs()
+        if not candidates:
+            self.status_signal.emit("Marque ao menos um idioma candidato.", DANGER)
+            return
+        self.speaker_service.candidate_languages = candidates
+        self.test_received_btn.setEnabled(False)
+        self.test_received_btn.setText("Testando (4s)...")
+        self.received_level_meter.set_level(0.0)
+        self.speaker_service.run_test(device, duration=4.0)
+
+    def _on_test_result(self, text, error):
+        self.test_received_btn.setEnabled(True)
+        self.test_received_btn.setText("🎚 Testar áudio recebido")
+        if error:
+            self.status_signal.emit(f"Teste falhou: {error}", DANGER)
+        elif text:
+            preview = text if len(text) <= 60 else text[:57] + "..."
+            matched = self.speaker_service.last_test_matched_language
+            lang_name = CODE_TO_LANG_NAME.get(matched, "")
+            prefix = f"[{lang_name}] " if lang_name and len(self._selected_received_langs()) > 1 else ""
+            self.status_signal.emit(f'Teste OK: {prefix}"{preview}"', ACCENT)
+        else:
+            self.status_signal.emit("Teste: nenhuma fala reconhecida (silêncio ou ruído baixo, ou nenhuma candidata bateu).", WARNING)
+
+    def _on_loopback_devices_changed(self):
+        self.loopback_devices = list_loopback_devices()
+        labels = [d.name for d in self.loopback_devices] or ["Nenhum dispositivo encontrado"]
+        self.received_device_combo.set_values(labels, keep_selection=True)
+
+    # ── overlay ──────────────────────────────────────────────────────────
+
+    def _apply_received_tts_output(self, _text=None):
+        label = self.received_tts_output_combo.currentText()
+        if not label:
+            return
+        try:
+            index = int(label.split(" - ", 1)[0])
+        except ValueError:
+            return
+        self.received_tts_engine.set_output_index(index)
+
+    def _on_received_tts_output_changed(self, _text):
+        self._apply_received_tts_output()
+        self._persist_settings()
+
+    def _apply_overlay_backend(self):
+        wants_openvr = self.overlay_backend_combo.currentText() == OVERLAY_BACKEND_OPENVR
+        name = "openvr" if wants_openvr else "desktop"
+        ok = self.overlay_mgr.select_backend(name)
+        if not ok and wants_openvr:
+            self.status_signal.emit("SteamVR não detectado — usando overlay de desktop.", WARNING)
+            self.overlay_mgr.select_backend("desktop")
+
+    def _on_overlay_toggled(self, checked):
+        self.overlay_mgr.enabled = checked
+        if not checked:
+            self.overlay_mgr.hide()
+        # o painel de configuracoes tem largura FIXA (SETTINGS_PANEL_WIDTH) e
+        # altura sobrando — mostrar/esconder este bloco nunca precisa
+        # redimensionar a janela, so o layout interno do painel.
+        self.overlay_settings_box.setVisible(checked)
+        self._persist_settings()
+
+    def _on_overlay_always_visible_toggled(self, checked):
+        self.overlay_mgr.set_always_visible(checked)
+        self.overlay_duration_slider.setEnabled(not checked)
+
+    # ── mute sync ────────────────────────────────────────────────────────
+
+    def _apply_mute_sync(self, checked):
+        if checked:
+            self.osc_receiver.start()
+        else:
+            self.osc_receiver.stop()
+            self._vrchat_muted = False
+
+    def _on_mute_sync_toggled(self, checked):
+        self._apply_mute_sync(checked)
+        self._persist_settings()
+
+    def _on_mute_changed(self, muted):
+        self._vrchat_muted = muted
+        if muted:
+            self.status_signal.emit("Microfone mutado no VRChat", WARNING)
+
+    def closeEvent(self, event):
+        self.running = False
+        self.speaker_service.stop()
+        self.osc_receiver.stop()
+        self.device_monitor.stop()
+        self.overlay_mgr.shutdown()
+        self._persist_settings()
+        event.accept()
+
+
+def main():
+    app = QApplication(sys.argv)
+    app.setStyle("Fusion")
+    window = MainWindow()
+    window.show()
+    sys.exit(app.exec())
 
 
 if __name__ == "__main__":
-    root = tk.Tk()
-    App(root)
-    root.mainloop()
+    main()

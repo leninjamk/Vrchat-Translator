@@ -1,1 +1,29 @@
-{}
+{
+    "mic": "Microphone (fifine SC3)",
+    "out": "CABLE Input (VB-Audio Virtual C",
+    "from_lang": "Português (BR)",
+    "to_lang": "Japonês",
+    "beep": true,
+    "tts_voice": true,
+    "chatbox_mode": "Original + tradução",
+    "panel_open": true,
+    "settings_open": true,
+    "window_x": 68,
+    "window_y": 15,
+    "listen_others": true,
+    "received_device": "Alto-falantes (fifine SC3) [Loopback]",
+    "received_langs": [
+        "ja"
+    ],
+    "received_tts": false,
+    "received_tts_output": "5 - Alto-falantes (fifine SC3)",
+    "overlay_enabled": true,
+    "overlay_backend": "Desktop (janela flutuante)",
+    "overlay_opacity": 90,
+    "overlay_duration": 6,
+    "overlay_always_visible": false,
+    "overlay_font_size": 20,
+    "overlay_max_lines": 4,
+    "mute_sync": true,
+    "mute_pause_mic": true
+}

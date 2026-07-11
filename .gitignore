@@ -21,6 +21,9 @@ __pycache__/
 *.suo
 *.user
 
+# ─── Claude Code (config/sessão local) ─────────────────────────────────────────
+.claude/
+
 # ─── Sistema Operacional ──────────────────────────────────────────────────────
 Thumbs.db
 .DS_Store

@@ -7,6 +7,7 @@ import threading
 import edge_tts
 from core.singleton import engine
 from core.voices import VOICES
+from core.echo_guard import echo_guard
 
 tts_lock = threading.Lock()
 
@@ -40,7 +41,11 @@ async def _generate(text: str, voice: str, path: str, pitch: int = 0) -> None:
     await communicate.save(path)
 
 
-def speak(text, lang="en", pitch=0):
+def speak(text, lang="en", pitch=0, engine_instance=None):
+    """engine_instance: qual AudioEngine (qual dispositivo de saida) tocar o
+    audio. Default None usa o engine global (minha fala). A fala recebida
+    passa um engine proprio (core.singleton.received_tts_engine) pra poder
+    usar um dispositivo de saida diferente — ver core/singleton.py."""
     text = _clean_text(text)
     if not text:
         print("❌ TTS vazio ignorado")
@@ -48,6 +53,7 @@ def speak(text, lang="en", pitch=0):
 
     lang = _normalize_lang(lang)
     voice = VOICES.get(lang, VOICES["en"])
+    target_engine = engine_instance or engine
 
     with tts_lock:
         tmp_path = None
@@ -61,7 +67,11 @@ def speak(text, lang="en", pitch=0):
                 print("❌ TTS error: audio vazio")
                 return
 
-            engine.play(tmp_path)
+            echo_guard.mark_tts_start()
+            try:
+                target_engine.play(tmp_path)
+            finally:
+                echo_guard.mark_tts_end()
 
         except Exception as e:
             print("❌ TTS error:", e)

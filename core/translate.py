@@ -10,10 +10,11 @@ LANG_FIX = {
     "kr": "ko",
 }
 
-def translate(text, target="en"):
+def translate(text, target="en", source="auto"):
     try:
         target = LANG_FIX.get(target, target)
-        return GoogleTranslator(source="auto", target=target).translate(text)
+        source = LANG_FIX.get(source, source) if source else "auto"
+        return GoogleTranslator(source=source, target=target).translate(text)
     except Exception as e:
         print("❌ translate error:", e)
         return text

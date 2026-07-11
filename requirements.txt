@@ -8,3 +8,10 @@ sounddevice
 soundfile
 deep_translator
 edge_tts
+PySide6
+PyAudioWPatch
+pycaw
+openvr
+numpy
+Pillow
+langdetect

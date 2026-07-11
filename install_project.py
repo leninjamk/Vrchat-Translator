@@ -140,15 +140,42 @@ def main():
     print("    Isso pode levar alguns minutos...")
     print()
 
-    # Roda com output visivel para o usuario acompanhar o progresso
-    result = subprocess.run(
-        [venv_python, "-m", "pip", "install", "-r", req_file]
-    )
+    import time as _time
+
+    max_attempts = 3
+    result = None
+    for attempt in range(1, max_attempts + 1):
+        pip_cmd = [venv_python, "-m", "pip", "install", "-r", req_file]
+        if attempt > 1:
+            # Em tentativas seguintes evita cache (pode estar com arquivo
+            # parcialmente bloqueado pelo antivirus na tentativa anterior)
+            pip_cmd.append("--no-cache-dir")
+            print(f"    Tentativa {attempt}/{max_attempts}...")
+
+        # Roda com output visivel para o usuario acompanhar o progresso
+        result = subprocess.run(pip_cmd)
+
+        if result.returncode == 0:
+            break
+
+        if attempt < max_attempts:
+            print()
+            print("    [!] Falhou, isso pode ser o antivirus bloqueando")
+            print("        arquivos temporariamente. Tentando de novo em 5s...")
+            print()
+            _time.sleep(5)
 
     if result.returncode != 0:
         print()
-        print("[X] ERRO: Falha ao instalar dependencias.")
-        print("    Verifique sua conexao com a internet e tente novamente.")
+        print("[X] ERRO: Falha ao instalar dependencias apos varias tentativas.")
+        print("    Isso geralmente e causado pelo antivirus (inclusive o Windows")
+        print("    Defender) bloqueando temporariamente os arquivos durante a")
+        print("    instalacao. Tente:")
+        print("      1) Desativar a protecao em tempo real do antivirus e rodar")
+        print("         o instalador de novo, ou")
+        print("      2) Clicar com o botao direito no instalador e escolher")
+        print("         'Executar como administrador'.")
+        print("    Se persistir, verifique sua conexao com a internet.")
         sys.exit(1)
 
     # ── 6. Sucesso ────────────────────────────────────────────────────────────
