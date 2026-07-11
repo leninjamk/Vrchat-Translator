@@ -24,6 +24,7 @@ import speech_recognition as sr
 
 from core.audio_device_manager import LoopbackDevice, PYAUDIO_LOCK
 from core.echo_guard import echo_guard
+from core.speaker_audio_source import SpeakerAudioSource
 from core.translate import translate
 
 RECOGNIZER_SAMPLE_RATE = 16000
@@ -105,8 +106,7 @@ class SpeakerRecognitionService:
     def __init__(self):
         self.recognizer = sr.Recognizer()
 
-        self._pa: Optional[pyaudio.PyAudio] = None
-        self._stream = None
+        self._source: Optional[SpeakerAudioSource] = None
         self._raw_queue: "queue.Queue[bytes]" = queue.Queue()
         self._segment_queue: "queue.Queue[tuple]" = queue.Queue(maxsize=5)
         self._vad_thread: Optional[threading.Thread] = None
@@ -139,6 +139,7 @@ class SpeakerRecognitionService:
         self.on_error: Optional[Callable[[str, bool], None]] = None  # (mensagem, fatal)
         self.on_level_changed: Optional[Callable[[float], None]] = None
         self.on_test_result: Optional[Callable[[Optional[str], Optional[str]], None]] = None
+        self.on_source_status: Optional[Callable[[str], None]] = None  # mensagens informativas da fonte de audio
 
     @staticmethod
     def _safe_call(fn, *args):
@@ -153,65 +154,58 @@ class SpeakerRecognitionService:
 
     # ── captura continua ─────────────────────────────────────────────────
 
-    def start(self, device: LoopbackDevice):
+    def start(self, source: SpeakerAudioSource) -> bool:
+        """source: de onde vem o audio (dispositivo inteiro ou um app
+        especifico — ver core/speaker_audio_source.py). O resto do pipeline
+        (VAD, reconhecimento, traducao, dedup) nao muda em nada — so recebe
+        blocos de PCM cru atraves de on_audio, sem saber de onde vieram."""
         if self._running:
-            return
+            return False
 
         self._segment_queue = queue.Queue(maxsize=max(self.queue_max_size, 1))
-        # PyAudioWPatch/PortAudio nao e thread-safe pra construir/abrir stream
-        # de duas threads ao mesmo tempo (derruba o processo com segfault) —
-        # o mesmo lock protege a enumeracao de dispositivos em audio_device_manager.
-        with PYAUDIO_LOCK:
-            pa = pyaudio.PyAudio()
-            try:
-                dev_info = pa.get_device_info_by_index(device.index)
-                sample_rate = int(dev_info["defaultSampleRate"])
-                channels = int(dev_info.get("maxInputChannels", 2)) or 2
-                frames_per_buffer = max(int(sample_rate * 0.03), 256)
+        self._raw_queue = queue.Queue()  # fresco a cada start (evita sobra de uma sessao anterior)
 
-                stream = pa.open(
-                    format=pyaudio.paInt16,
-                    channels=channels,
-                    rate=sample_rate,
-                    frames_per_buffer=frames_per_buffer,
-                    input=True,
-                    input_device_index=device.index,
-                    stream_callback=self._make_audio_callback(),
-                )
-            except Exception as e:
-                pa.terminate()
-                self._safe_call(self.on_error, f"Não foi possível abrir o dispositivo de áudio recebido: {e}", True)
-                return
-
-        self._pa = pa
-        self._stream = stream
         self._running = True
-        stream.start_stream()
+        ok = source.start(
+            on_audio=self._on_source_audio,
+            on_error=lambda msg, fatal: self._safe_call(self.on_error, msg, fatal),
+            on_status=lambda msg: self._safe_call(self.on_source_status, msg),
+            on_ready=self._on_source_ready,
+        )
+        if not ok:
+            self._running = False
+            return False
 
+        self._source = source
+        self._process_thread = threading.Thread(target=self._process_loop, daemon=True)
+        self._process_thread.start()
+        return True
+
+    def _on_source_audio(self, raw_bytes: bytes):
+        if self._running:
+            self._raw_queue.put(raw_bytes)
+
+    def _on_source_ready(self, sample_rate: int, channels: int, frames_per_buffer: int):
+        """Chamado (de qualquer thread) quando a fonte sabe o formato real do
+        audio — so entao da pra iniciar o VAD. No modo 'aplicativo
+        especifico' isso pode demorar (esperando o app abrir); ate la o
+        _process_thread ja esta de pe, so ocioso (a fila de segmentos
+        continua vazia)."""
+        if self._vad_thread is not None and self._vad_thread.is_alive():
+            return
         self._vad_thread = threading.Thread(
             target=self._vad_loop, args=(sample_rate, channels, frames_per_buffer), daemon=True,
         )
         self._vad_thread.start()
 
-        self._process_thread = threading.Thread(target=self._process_loop, daemon=True)
-        self._process_thread.start()
-
     def stop(self):
         self._running = False
-        with PYAUDIO_LOCK:
-            if self._stream is not None:
-                try:
-                    self._stream.stop_stream()
-                    self._stream.close()
-                except Exception:
-                    pass
-                self._stream = None
-            if self._pa is not None:
-                try:
-                    self._pa.terminate()
-                except Exception:
-                    pass
-                self._pa = None
+        if self._source is not None:
+            try:
+                self._source.stop()
+            except Exception:
+                pass
+            self._source = None
         self._drain(self._raw_queue)
 
     @staticmethod
@@ -221,13 +215,6 @@ class SpeakerRecognitionService:
                 q.get_nowait()
             except queue.Empty:
                 break
-
-    def _make_audio_callback(self):
-        def _callback(in_data, frame_count, time_info, status):
-            if self._running:
-                self._raw_queue.put(in_data)
-            return (None, pyaudio.paContinue)
-        return _callback
 
     def _vad_loop(self, sample_rate, channels, frames_per_buffer):
         speaking = False

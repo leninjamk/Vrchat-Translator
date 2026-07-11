@@ -178,7 +178,35 @@ def main():
         print("    Se persistir, verifique sua conexao com a internet.")
         sys.exit(1)
 
-    # ── 6. Sucesso ────────────────────────────────────────────────────────────
+    # ── 6. Voz local Kokoro (OPCIONAL, gratuita, melhor qualidade) ─────────────
+    # Best-effort de proposito: as dependencias essenciais ja instalaram com
+    # sucesso acima (nunca chega aqui se o passo 5 falhou). Se o Kokoro nao
+    # instalar (Python >=3.13, sem internet, etc.), o app funciona normal
+    # com o edge-tts de sempre — so nao mostra as vozes Kokoro extras.
+    #
+    # De proposito SEM os extras "misaki[ja,zh]" (vozes japonesa/mandarim do
+    # Kokoro) aqui: eles puxam o pacote pyopenjtalk, que precisa COMPILAR uma
+    # extensao nativa (exige Visual Studio instalado) — a grande maioria dos
+    # usuarios nao tem isso, e incluir esses extras no MESMO comando faz o
+    # pip falhar a instalacao INTEIRA (nada instala, nem o Kokoro basico).
+    # As vozes Kokoro de portugues/ingles/espanhol/frances/italiano/hindi nao
+    # precisam disso e instalam normal. Sem o pyopenjtalk, as vozes japonesa/
+    # mandarim do Kokoro especificamente ficam indisponiveis e caem sozinhas
+    # pro edge-tts (ver core/tts.py) — quem quiser essas duas pode instalar
+    # manualmente depois com Visual Studio Build Tools + "misaki[ja,zh]".
+    print("[*] Instalando voz local Kokoro (opcional, pode ser pulado)...")
+    kokoro_result = subprocess.run(
+        [venv_python, "-m", "pip", "install", "kokoro", "misaki", "soundfile", "--quiet"],
+        capture_output=True, text=True,
+    )
+    if kokoro_result.returncode == 0:
+        print("[OK] Voz local Kokoro instalada!")
+    else:
+        print("    [!] Voz local Kokoro não instalada (opcional — o app")
+        print("        continua funcionando normal com as vozes de sempre).")
+    print()
+
+    # ── 7. Sucesso ────────────────────────────────────────────────────────────
     print()
     print("=" * 51)
     print("[OK] INSTALACAO CONCLUIDA COM SUCESSO!")

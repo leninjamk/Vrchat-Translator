@@ -26,7 +26,10 @@ Name: "brazilianportuguese"; MessagesFile: "compiler:Languages\BrazilianPortugue
 Name: "desktopicon"; Description: "Criar atalho na Área de Trabalho"; GroupDescription: "Atalhos adicionais:"
 
 [Files]
-Source: "{#ProjectDir}\*"; DestDir: "{app}"; Excludes: ".venv,__pycache__,.git,.claude,settings.json,main.py,core\audio.py,*.pyc,*.pyo,*.exe,installer.iss"; Flags: recursesubdirs ignoreversion
+Source: "{#ProjectDir}\*"; DestDir: "{app}"; Excludes: ".venv,__pycache__,.git,.claude,settings.json,main.py,core\audio.py,*.pyc,*.pyo,*.exe,installer.iss,bin,native"; Flags: recursesubdirs ignoreversion
+; O auxiliar nativo de captura por aplicativo (bin\app_loopback_capture.exe) fica
+; de fora do wildcard "*.exe" acima de proposito — precisa de uma linha dedicada.
+Source: "{#ProjectDir}\bin\*"; DestDir: "{app}\bin"; Flags: ignoreversion
 
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\Run.bat"; WorkingDir: "{app}"

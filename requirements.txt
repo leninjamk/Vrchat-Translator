@@ -15,3 +15,4 @@ openvr
 numpy
 Pillow
 langdetect
+psutil

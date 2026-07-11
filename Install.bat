@@ -118,4 +118,37 @@ if !errorlevel! neq 0 (
     exit /b 1
 )
 
+:: ─────────────────────────────────────────────────────────────────────────────
+::  PASSO 4: espeak-ng (OPCIONAL — habilita as vozes locais Kokoro, mais
+::  naturais). Best-effort: se isso falhar por qualquer motivo, o app
+::  continua funcionando 100% normal com as vozes de sempre, so sem as
+::  opcoes extras de voz local — por isso NUNCA usa "exit /b 1" aqui.
+:: ─────────────────────────────────────────────────────────────────────────────
+where espeak-ng >nul 2>&1
+if !errorlevel! == 0 (
+    echo [OK] espeak-ng ja estava instalado ^(vozes locais Kokoro disponiveis^).
+) else (
+    echo [*] Instalando voz local Kokoro - espeak-ng ^(opcional^)...
+
+    set "ESPEAK_URL=https://github.com/espeak-ng/espeak-ng/releases/latest/download/espeak-ng.msi"
+    set "ESPEAK_MSI=%TEMP%\espeak_ng_tradutor_setup.msi"
+
+    powershell -NoProfile -ExecutionPolicy Bypass -Command "try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; (New-Object Net.WebClient).DownloadFile('!ESPEAK_URL!', '!ESPEAK_MSI!') } catch { exit 1 }" >nul 2>&1
+
+    if !errorlevel! == 0 if exist "!ESPEAK_MSI!" (
+        msiexec /i "!ESPEAK_MSI!" /quiet /norestart >nul 2>&1
+        del "!ESPEAK_MSI!" >nul 2>&1
+
+        where espeak-ng >nul 2>&1
+        if !errorlevel! == 0 (
+            echo [OK] espeak-ng instalado! Vozes locais Kokoro disponiveis.
+        ) else (
+            echo     [!] espeak-ng nao instalou ^(opcional — as vozes de sempre continuam funcionando normal^).
+        )
+    ) else (
+        echo     [!] Nao foi possivel baixar o espeak-ng ^(opcional — as vozes de sempre continuam funcionando normal^).
+    )
+)
+echo.
+
 endlocal

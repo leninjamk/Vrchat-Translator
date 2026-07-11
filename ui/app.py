@@ -17,12 +17,15 @@ from PySide6.QtWidgets import (
 
 from core.singleton import engine, received_tts_engine
 from core.languages import LANGS
+from core.voices import voice_options_for, find_voice_option, normalize_lang_code
 from core.history import (
     HistoryEntry, CATEGORY_TRANSLATED, CATEGORY_SAME_LANG, CATEGORY_ERROR, CATEGORY_RECEIVED,
     SOURCE_LOCAL, SOURCE_RECEIVED,
 )
 from core.audio_device_manager import list_loopback_devices, get_default_loopback_device, find_loopback_device_by_name, LoopbackDeviceMonitor
 from core.speaker_loopback import SpeakerRecognitionService
+from core.speaker_audio_source import FullDeviceLoopbackSource, ApplicationAudioSource
+from core.audio_sessions import list_audio_session_apps
 from core.vrchat_osc_receiver import VRChatOSCReceiver
 from core.overlay.overlay_manager import overlay_manager
 from core.overlay.desktop_overlay import DesktopOverlayWindow
@@ -76,6 +79,18 @@ RECEIVED_STATUS_LISTENING = ("Ouvindo...", RECEIVED_ACCENT)
 RECEIVED_STATUS_SPEECH = ("Fala detectada", RECEIVED_ACCENT)
 RECEIVED_STATUS_TRANSLATING = ("Traduzindo...", RECEIVED_ACCENT)
 RECEIVED_STATUS_ERROR = ("Erro", DANGER)
+
+# Fonte do audio da fala recebida — "Ouvir Pessoas" continua a mesma funcao,
+# só muda de ONDE ela captura (ver core/speaker_audio_source.py).
+SOURCE_MODE_FULL_DEVICE = "Todo o áudio do computador"
+SOURCE_MODE_APPLICATION = "Aplicativo específico"
+SOURCE_MODES = [SOURCE_MODE_FULL_DEVICE, SOURCE_MODE_APPLICATION]
+SOURCE_MODE_KEY_TO_DISPLAY = {
+    "full_device": SOURCE_MODE_FULL_DEVICE,
+    "application": SOURCE_MODE_APPLICATION,
+}
+SOURCE_MODE_DISPLAY_TO_KEY = {v: k for k, v in SOURCE_MODE_KEY_TO_DISPLAY.items()}
+WAITING_APP_SUFFIX = " (aguardando abrir)"
 
 
 def load_settings():
@@ -138,6 +153,7 @@ class MainWindow(QWidget):
         self._settings = load_settings()
         self.panel_open = bool(self._settings.get("panel_open", False))
         self.settings_open = bool(self._settings.get("settings_open", False))
+        self._voice_overrides = dict(self._settings.get("voice_overrides", {}))
 
         self.speaker_service = SpeakerRecognitionService()
         self.speaker_service.on_speech_started = lambda: self.received_status_signal.emit(*RECEIVED_STATUS_SPEECH)
@@ -147,6 +163,7 @@ class MainWindow(QWidget):
         self.speaker_service.on_error = lambda msg, fatal: self._on_speaker_error(msg, fatal)
         self.speaker_service.on_level_changed = lambda level: self.level_signal.emit(level)
         self.speaker_service.on_test_result = lambda text, err: self.test_result_signal.emit(text, err)
+        self.speaker_service.on_source_status = self._on_source_status
 
         self.osc_receiver = VRChatOSCReceiver()
         self.osc_receiver.on_mute_changed = lambda muted: self.mute_changed_signal.emit(muted)
@@ -457,10 +474,15 @@ class MainWindow(QWidget):
 
     def _build_voice_card(self):
         card, content = make_card("Voz")
+        # card mais cheio agora (2 seletores de voz novos) — aperta as margens/
+        # espacamento so DESTE card, sem mexer no make_card() compartilhado
+        content.setSpacing(2)
+        card.layout().setContentsMargins(14, 4, 14, 4)
+        card.layout().setSpacing(2)
 
         self.pitch_slider = self._build_labeled_slider(
             content, "Pitch (tom de voz)", -50, 50, 0,
-            tooltip="Ajusta o tom da voz sintetizada (grave a agudo)",
+            tooltip="Ajusta o tom da voz sintetizada (grave a agudo) — não afeta vozes Kokoro",
         )
         hint_row = QHBoxLayout()
         grave = QLabel("Grave")
@@ -472,8 +494,97 @@ class MainWindow(QWidget):
         hint_row.addWidget(agudo)
         content.addLayout(hint_row)
 
+        self._voice_combo_maps = {"my": {}, "received": {}}
+
+        my_voice_row = QHBoxLayout()
+        my_voice_row.setSpacing(6)
+        my_voice_label = QLabel("Minha:")
+        my_voice_label.setObjectName("RowHint")
+        my_voice_row.addWidget(my_voice_label, 0)
+        self.my_voice_combo = ModernCombo(self, values=["-"])
+        self.my_voice_combo.setToolTip("Voz usada quando SUA fala é falada em voz alta (idioma = Destino)")
+        my_voice_row.addWidget(self.my_voice_combo, 1)
+        content.addLayout(my_voice_row)
+
+        received_voice_row = QHBoxLayout()
+        received_voice_row.setSpacing(6)
+        received_voice_label = QLabel("Recebida:")
+        received_voice_label.setObjectName("RowHint")
+        received_voice_row.addWidget(received_voice_label, 0)
+        self.received_voice_combo = ModernCombo(self, values=["-"])
+        self.received_voice_combo.setToolTip("Voz usada quando a fala RECEBIDA é falada em voz alta (idioma = Origem)")
+        received_voice_row.addWidget(self.received_voice_combo, 1)
+        content.addLayout(received_voice_row)
+
+        self._refresh_voice_combo("my", self.to_lang.currentText())
+        self._refresh_voice_combo("received", self.from_lang.currentText())
+
+        self.to_lang.currentTextChanged.connect(lambda t: self._refresh_voice_combo("my", t))
+        self.from_lang.currentTextChanged.connect(lambda t: self._refresh_voice_combo("received", t))
+        self.my_voice_combo.currentTextChanged.connect(lambda _t: self._on_voice_combo_changed("my"))
+        self.received_voice_combo.currentTextChanged.connect(lambda _t: self._on_voice_combo_changed("received"))
+
         card.setMinimumHeight(115)
         return card
+
+    @staticmethod
+    def _voice_display_name(voice_id: str, engine_name: str) -> str:
+        if engine_name == "edge":
+            name = voice_id.split("-")[-1]
+            if name.endswith("Neural"):
+                name = name[:-len("Neural")]
+            if name.endswith("Multilingual"):
+                return f"{name[:-len('Multilingual')]} (Multilíngue)"
+            return name
+        return voice_id.split("_", 1)[-1].capitalize()
+
+    def _voice_option_label(self, opt) -> str:
+        gender_icon = "♀" if opt.gender == "F" else "♂"
+        name = self._voice_display_name(opt.id, opt.engine)
+        return f"{gender_icon} {name} — {opt.style}"
+
+    def _refresh_voice_combo(self, role: str, lang_display_name: str):
+        combo = self.my_voice_combo if role == "my" else self.received_voice_combo
+        lang_code = LANGS.get(lang_display_name, "en")
+
+        if lang_code == "auto":
+            combo.set_values(["Automático — segue o idioma detectado"])
+            combo.set_enabled(False)
+            self._voice_combo_maps[role] = {}
+            return
+
+        combo.set_enabled(True)
+        mapping = {}
+        labels = []
+        for opt in voice_options_for(lang_code):
+            label = self._voice_option_label(opt)
+            labels.append(label)
+            mapping[label] = opt.id
+        self._voice_combo_maps[role] = mapping
+        combo.set_values(labels)
+
+        saved_id = self._voice_overrides.get(normalize_lang_code(lang_code))
+        if saved_id:
+            saved_label = next((lbl for lbl, vid in mapping.items() if vid == saved_id), None)
+            if saved_label:
+                combo.setCurrentText(saved_label)
+
+    def _on_voice_combo_changed(self, role: str):
+        combo = self.my_voice_combo if role == "my" else self.received_voice_combo
+        voice_id = self._voice_combo_maps.get(role, {}).get(combo.currentText())
+        if not voice_id:
+            return
+        lang_display_name = self.to_lang.currentText() if role == "my" else self.from_lang.currentText()
+        lang_code = normalize_lang_code(LANGS.get(lang_display_name, "en"))
+        self._voice_overrides[lang_code] = voice_id
+        self._persist_settings()
+
+    def _resolve_voice(self, lang_code):
+        lang_code = normalize_lang_code(lang_code)
+        voice_id = self._voice_overrides.get(lang_code)
+        if voice_id and find_voice_option(lang_code, voice_id):
+            return voice_id
+        return None
 
     def _toggle_row(self, content, icon_text, label_text, checked, tooltip=None):
         row = QHBoxLayout()
@@ -589,6 +700,48 @@ class MainWindow(QWidget):
                 default_received = default_dev.name
         if default_received in loopback_labels:
             self.received_device_combo.setCurrentText(default_received)
+
+        content.addWidget(self._row_label("Fonte do áudio"))
+        self.received_source_mode_combo = ModernCombo(self, values=SOURCE_MODES)
+        self.received_source_mode_combo.setToolTip(
+            "'Todo o áudio do computador' é o modo de sempre. 'Aplicativo específico' "
+            "escuta só o programa escolhido abaixo (ex: só o VRChat), ignorando os outros."
+        )
+        content.addWidget(self.received_source_mode_combo)
+        saved_mode_key = settings.get("speaker_audio_source_mode", "full_device")
+        self.received_source_mode_combo.setCurrentText(
+            SOURCE_MODE_KEY_TO_DISPLAY.get(saved_mode_key, SOURCE_MODE_FULL_DEVICE)
+        )
+
+        app_row = QHBoxLayout()
+        app_row.setSpacing(6)
+        app_labels, self._app_picker_map = self._build_app_picker_labels(list_audio_session_apps())
+        self.received_app_combo = ModernCombo(self, values=app_labels)
+        self.received_app_combo.setToolTip(
+            "Só usado no modo 'Aplicativo específico' — escolha o programa cujo áudio "
+            "você quer escutar (ex: VRChat.exe). Clique em 🔄 pra atualizar a lista."
+        )
+        app_row.addWidget(self.received_app_combo, 1)
+        self.refresh_apps_btn = QPushButton("🔄")
+        self.refresh_apps_btn.setObjectName("Ghost")
+        self.refresh_apps_btn.setCursor(Qt.PointingHandCursor)
+        self.refresh_apps_btn.setFixedSize(34, 27)
+        self.refresh_apps_btn.setToolTip("Reconsulta os programas abertos com sessão de áudio agora")
+        app_row.addWidget(self.refresh_apps_btn, 0)
+        content.addLayout(app_row)
+        saved_exe = settings.get("speaker_target_executable")
+        if saved_exe:
+            saved_label = next((lbl for lbl, exe in self._app_picker_map.items() if exe == saved_exe), None)
+            if saved_label:
+                self.received_app_combo.setCurrentText(saved_label)
+
+        is_app_mode = self._current_source_mode_key() == "application"
+        self.received_app_combo.set_enabled(is_app_mode)
+        self.refresh_apps_btn.setEnabled(is_app_mode)
+
+        self.received_source_mode_combo.currentTextChanged.connect(self._on_source_mode_changed)
+        self.received_app_combo.currentTextChanged.connect(self._on_target_app_changed)
+        self.refresh_apps_btn.clicked.connect(self._on_refresh_apps_clicked)
 
         content.addWidget(self._row_label("Idiomas candidatos (marque um ou mais)"))
         self._build_received_lang_checklist(content, self._initial_received_langs(settings))
@@ -967,6 +1120,8 @@ class MainWindow(QWidget):
 
             "listen_others": self.listen_others_switch.isChecked(),
             "received_device": self.received_device_combo.currentText(),
+            "speaker_audio_source_mode": self._current_source_mode_key(),
+            "speaker_target_executable": self._current_target_executable() or self._settings.get("speaker_target_executable"),
             "received_langs": self._selected_received_langs(),
             "received_tts": self.received_tts_switch.isChecked(),
             "received_tts_output": self.received_tts_output_combo.currentText(),
@@ -981,6 +1136,8 @@ class MainWindow(QWidget):
 
             "mute_sync": self.mute_sync_switch.isChecked(),
             "mute_pause_mic": self.mute_pause_mic_switch.isChecked(),
+
+            "voice_overrides": self._voice_overrides,
         }
         save_settings(self._settings)
 
@@ -1041,14 +1198,15 @@ class MainWindow(QWidget):
         # fala RECEBIDA toca no dispositivo de fala recebida (meu fone/headset);
         # minha propria fala toca no "Saída do TTS" de sempre (engine default)
         engine_instance = self.received_tts_engine if entry.category == CATEGORY_RECEIVED else None
+        voice = self._resolve_voice(lang_code)
         threading.Thread(
-            target=self._speak_async, args=(text, lang_code, pitch, engine_instance), daemon=True,
+            target=self._speak_async, args=(text, lang_code, pitch, engine_instance, voice), daemon=True,
         ).start()
 
     @staticmethod
-    def _speak_async(text, lang_code, pitch, engine_instance=None):
+    def _speak_async(text, lang_code, pitch, engine_instance=None, voice=None):
         from core.tts import speak
-        speak(text, lang_code, pitch, engine_instance=engine_instance)
+        speak(text, lang_code, pitch, engine_instance=engine_instance, voice=voice)
 
     def _is_chatbox_muted(self) -> bool:
         return self.mute_sync_switch.isChecked() and self._vrchat_muted
@@ -1106,7 +1264,7 @@ class MainWindow(QWidget):
                         sent_to_chatbox=sent, tts_played=will_tts,
                     ))
                     if will_tts:
-                        speak(text, current_to, current_pitch)
+                        speak(text, current_to, current_pitch, voice=self._resolve_voice(current_to))
                 else:
                     # revertido pra "auto" por pedido do usuario: passar a lingua
                     # de origem explicita (lang_from_code) piorou a traducao da
@@ -1134,7 +1292,7 @@ class MainWindow(QWidget):
                         sent_to_chatbox=sent, tts_played=will_tts,
                     ))
                     if will_tts:
-                        speak(translated, current_to, current_pitch)
+                        speak(translated, current_to, current_pitch, voice=self._resolve_voice(current_to))
             except Exception as e:
                 ts = time.strftime("%H:%M:%S")
                 self.history_panel.add_entry(HistoryEntry(
@@ -1158,11 +1316,87 @@ class MainWindow(QWidget):
         for cb in self.received_lang_checks.values():
             cb.setEnabled(enabled)
 
+    # ── fonte do audio (todo o computador vs. aplicativo especifico) ───────
+
+    def _build_app_picker_labels(self, apps):
+        """(labels, label->executavel). Se o app salvo em settings.json nao
+        estiver na lista AO VIVO, adiciona uma entrada sintetica pra nao
+        perder a selecao — o app so ainda nao esta aberto, e isso NAO deve
+        reverter silenciosamente pro modo 'todo o computador'."""
+        labels = []
+        mapping = {}
+        for app in apps:
+            label = f"{app.display_name} — {app.executable}"
+            labels.append(label)
+            mapping[label] = app.executable
+        saved_exe = self._settings.get("speaker_target_executable")
+        if saved_exe and saved_exe not in mapping.values():
+            label = f"{saved_exe}{WAITING_APP_SUFFIX}"
+            labels.insert(0, label)
+            mapping[label] = saved_exe
+        if not labels:
+            labels = ["Nenhum aplicativo encontrado"]
+        return labels, mapping
+
+    def _current_source_mode_key(self) -> str:
+        return SOURCE_MODE_DISPLAY_TO_KEY.get(self.received_source_mode_combo.currentText(), "full_device")
+
+    def _current_target_executable(self):
+        return self._app_picker_map.get(self.received_app_combo.currentText())
+
+    def _set_app_picker_enabled(self, is_app_mode: bool):
+        self.received_app_combo.set_enabled(is_app_mode)
+        self.refresh_apps_btn.setEnabled(is_app_mode)
+        self._refresh_test_button_enabled()
+
+    def _refresh_test_button_enabled(self):
+        is_app_mode = self._current_source_mode_key() == "application"
+        self.test_received_btn.setEnabled(not is_app_mode and not self.listen_others_switch.isChecked())
+
+    def _on_refresh_apps_clicked(self):
+        apps = list_audio_session_apps()
+        labels, mapping = self._build_app_picker_labels(apps)
+        self._app_picker_map = mapping
+        current = self.received_app_combo.currentText()
+        self.received_app_combo.set_values(labels, keep_selection=True)
+        if current not in labels and labels:
+            self.received_app_combo.setCurrentIndex(0)
+        if not apps:
+            self.received_status_signal.emit("Nenhum aplicativo com sessão de áudio encontrado", WARNING)
+
+    def _on_source_mode_changed(self, _text):
+        self._set_app_picker_enabled(self._current_source_mode_key() == "application")
+        self._persist_settings()
+        self._restart_listening_if_active()
+
+    def _on_target_app_changed(self, _text):
+        self._persist_settings()
+        self._restart_listening_if_active()
+
+    def _restart_listening_if_active(self):
+        if not self.listen_others_switch.isChecked():
+            return
+        self._apply_listen_others(False)
+        self._apply_listen_others(True)
+
+    def _build_audio_source(self):
+        """Monta a fonte certa pro modo/selecao atual. Retorna (source, erro) —
+        so um dos dois e nao-None."""
+        if self._current_source_mode_key() == "application":
+            exe = self._current_target_executable() or self._settings.get("speaker_target_executable")
+            if not exe:
+                return None, "Selecione um aplicativo específico"
+            return ApplicationAudioSource(exe), None
+        device = self._get_selected_loopback_device()
+        if device is None:
+            return None, "Selecione um dispositivo válido"
+        return FullDeviceLoopbackSource(device), None
+
     def _apply_listen_others(self, checked):
         if checked:
-            device = self._get_selected_loopback_device()
-            if device is None:
-                self.received_status_signal.emit("Selecione um dispositivo válido", DANGER)
+            source, err = self._build_audio_source()
+            if source is None:
+                self.received_status_signal.emit(err, DANGER)
                 self.listen_others_switch.setChecked(False)
                 return
             candidates = self._selected_received_langs()
@@ -1172,22 +1406,37 @@ class MainWindow(QWidget):
                 return
             self.speaker_service.candidate_languages = candidates
             self.speaker_service.target_language = LANGS.get(self.from_lang.currentText(), "pt")
-            self.speaker_service.start(device)
-            self.received_status_signal.emit(*RECEIVED_STATUS_LISTENING)
+            ok = self.speaker_service.start(source)
+            if not ok:
+                return  # on_error(fatal=True) ja avisou e desligou o switch
+            if isinstance(source, FullDeviceLoopbackSource):
+                self.received_status_signal.emit(*RECEIVED_STATUS_LISTENING)
+            # ApplicationAudioSource ja emite o status certo sozinha (via on_source_status)
+            # A combo de fonte/aplicativo fica LIGADA de proposito mesmo escutando —
+            # trocar a fonte (ou o app) com "Ouvir Pessoas" ligado precisa funcionar
+            # sem desligar antes (ver _restart_listening_if_active).
             self.received_device_combo.set_enabled(False)
             self._set_received_langs_enabled(False)
-            self.test_received_btn.setEnabled(False)
+            self._refresh_test_button_enabled()
         else:
             self.speaker_service.stop()
             self.received_status_signal.emit(*RECEIVED_STATUS_STOPPED)
             self.received_device_combo.set_enabled(True)
+            self.received_source_mode_combo.set_enabled(True)
+            self._set_app_picker_enabled(self._current_source_mode_key() == "application")
             self._set_received_langs_enabled(True)
-            self.test_received_btn.setEnabled(True)
             self.received_level_meter.set_level(0.0)
 
     def _on_listen_others_toggled(self, checked):
         self._apply_listen_others(checked)
         self._persist_settings()
+
+    def _on_source_status(self, msg: str):
+        # "Aguardando X.exe..." e um estado de espera (cor de aviso); qualquer
+        # outra mensagem da fonte (ex: "Ouvindo somente X.exe") e um estado
+        # normal de funcionamento, mesma cor do "Ouvindo..." padrao.
+        color = WARNING if msg.startswith("Aguardando") else RECEIVED_ACCENT
+        self.received_status_signal.emit(msg, color)
 
     def _set_received_status(self, text, color):
         self._received_status_label.setText(f"● {text}")
@@ -1220,9 +1469,10 @@ class MainWindow(QWidget):
 
         if self.received_tts_switch.isChecked():
             pitch = self.pitch_slider.value()
+            voice = self._resolve_voice(result.target_language)
             threading.Thread(
                 target=self._speak_async,
-                args=(result.translated_text, result.target_language, pitch, self.received_tts_engine),
+                args=(result.translated_text, result.target_language, pitch, self.received_tts_engine, voice),
                 daemon=True,
             ).start()
 
