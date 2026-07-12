@@ -484,6 +484,7 @@ class MainWindow(QWidget):
 
     def _build_voice_card(self):
         card, content = make_card("Voz")
+        content.setSpacing(2)
 
         self.pitch_slider = self._build_labeled_slider(
             content, "Pitch (tom de voz)", -50, 50, 0,
@@ -499,7 +500,7 @@ class MainWindow(QWidget):
         hint_row.addWidget(agudo)
         content.addLayout(hint_row)
 
-        content.addWidget(self._row_label("Voz da minha fala (falada no idioma de Destino)"))
+        content.addWidget(self._row_label("Voz da minha fala"))
         self.my_voice_combo = ModernCombo(self, values=["-"])
         self.my_voice_combo.setToolTip(
             "Voz usada quando a SUA fala traduzida é falada em voz alta pro app. "
@@ -954,6 +955,20 @@ class MainWindow(QWidget):
         self.history_panel.setVisible(False)
         self.adjustSize()
         height = self.height()
+
+        # adjustSize() as vezes sub-estima por alguns pixels a altura que o
+        # left_container (e, quando aberto, o painel de configuracoes)
+        # realmente precisam (visto empiricamente com cards mais cheios) —
+        # corrige aqui em vez de reajustar margens/espacamento de cada card
+        # toda vez que um campo novo e adicionado no futuro. "chrome" e o
+        # espaco que a janela gasta fora do left_container (cabecalho,
+        # margens) — usado pra saber quanto o settings_panel (oculto agora,
+        # mas com sizeHint() ja valido) vai precisar de janela quando abrir.
+        chrome = height - self.left_container.height()
+        needed_for_left = self.left_container.sizeHint().height() + chrome
+        needed_for_settings = self.settings_panel.layout().sizeHint().height() + chrome
+        height = max(height, needed_for_left, needed_for_settings)
+
         self.setFixedSize(COMPACT_WIDTH, height)
         self._fixed_height = height
         self._current_width = COMPACT_WIDTH
