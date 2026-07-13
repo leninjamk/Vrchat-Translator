@@ -202,8 +202,8 @@ class MainWindow(QWidget):
 
     def _build_ui(self):
         root = QVBoxLayout(self)
-        root.setContentsMargins(ROOT_MARGIN_H, 12, ROOT_MARGIN_H, 12)
-        root.setSpacing(10)
+        root.setContentsMargins(ROOT_MARGIN_H, 9, ROOT_MARGIN_H, 9)
+        root.setSpacing(8)
 
         root.addLayout(self._build_header())
 
@@ -243,7 +243,7 @@ class MainWindow(QWidget):
 
     def _build_header(self):
         row = QHBoxLayout()
-        row.setContentsMargins(0, 8, 0, 8)
+        row.setContentsMargins(0, 5, 0, 5)
 
         logo = QLabel("VR")
         logo.setFixedSize(44, 44)
@@ -284,11 +284,10 @@ class MainWindow(QWidget):
         container.setFixedWidth(LEFT_PANEL_WIDTH)
         layout = QVBoxLayout(container)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(5)
+        layout.setSpacing(4)
 
         layout.addWidget(self._build_audio_card())
-        layout.addWidget(self._build_language_card())
-        layout.addWidget(self._build_voice_card())
+        layout.addWidget(self._build_language_voice_card())
         layout.addWidget(self._build_features_card())
         layout.addLayout(self._build_action_buttons())
 
@@ -324,7 +323,7 @@ class MainWindow(QWidget):
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.NoFrame)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        scroll.setFixedHeight(168)
+        scroll.setFixedHeight(128)
 
         inner = QWidget()
         grid = QGridLayout(inner)
@@ -441,11 +440,12 @@ class MainWindow(QWidget):
         if self.outputs:
             self.output.setCurrentIndex(default_out_idx)
 
-        card.setMinimumHeight(135)
+        card.setMinimumHeight(122)
         return card
 
-    def _build_language_card(self):
-        card, content = make_card("Idiomas")
+    def _build_language_voice_card(self):
+        card, content = make_card("Idiomas e voz")
+        content.setSpacing(3)
         settings = self._settings
 
         from_list = list(LANGS.keys())
@@ -459,18 +459,6 @@ class MainWindow(QWidget):
         self.from_lang.setCurrentIndex(default_from_idx)
         content.addWidget(self.from_lang)
 
-        swap_row = QHBoxLayout()
-        swap_row.addStretch(1)
-        self.swap_btn = QPushButton("↔  Trocar")
-        self.swap_btn.setObjectName("Ghost")
-        self.swap_btn.setCursor(Qt.PointingHandCursor)
-        self.swap_btn.setFixedHeight(30)
-        self.swap_btn.setToolTip("Troca os idiomas de origem e destino")
-        self.swap_btn.clicked.connect(self._swap_languages)
-        swap_row.addWidget(self.swap_btn)
-        swap_row.addStretch(1)
-        content.addLayout(swap_row)
-
         content.addWidget(self._row_label("Destino (idioma de quem me ouve)"))
         self.to_lang = ModernCombo(self, values=to_list)
         default_to_idx = 0
@@ -479,20 +467,13 @@ class MainWindow(QWidget):
         self.to_lang.setCurrentIndex(default_to_idx)
         content.addWidget(self.to_lang)
 
-        card.setMinimumHeight(190)
-        return card
-
-    def _swap_languages(self):
-        current_from = self.from_lang.currentText()
-        current_to = self.to_lang.currentText()
-        if current_from == "Auto Detect":
-            return
-        self.from_lang.setCurrentText(current_to)
-        self.to_lang.setCurrentText(current_from)
-
-    def _build_voice_card(self):
-        card, content = make_card("Voz")
-        content.setSpacing(2)
+        content.addWidget(self._row_label("Voz da minha fala"))
+        self.my_voice_combo = ModernCombo(self, values=["-"])
+        self.my_voice_combo.setToolTip(
+            "Voz usada quando a SUA fala traduzida é falada em voz alta pro app. "
+            "Muda de opções conforme o idioma escolhido em 'Destino'."
+        )
+        content.addWidget(self.my_voice_combo)
 
         self.pitch_slider = self._build_labeled_slider(
             content, "Pitch (tom de voz)", -50, 50, 0,
@@ -508,19 +489,11 @@ class MainWindow(QWidget):
         hint_row.addWidget(agudo)
         content.addLayout(hint_row)
 
-        content.addWidget(self._row_label("Voz da minha fala"))
-        self.my_voice_combo = ModernCombo(self, values=["-"])
-        self.my_voice_combo.setToolTip(
-            "Voz usada quando a SUA fala traduzida é falada em voz alta pro app. "
-            "Muda de opções conforme o idioma escolhido em 'Destino'."
-        )
-        content.addWidget(self.my_voice_combo)
-
         self._refresh_voice_combo("my", self.to_lang.currentText())
         self.to_lang.currentTextChanged.connect(lambda t: self._refresh_voice_combo("my", t))
         self.my_voice_combo.currentTextChanged.connect(lambda _t: self._on_voice_combo_changed("my"))
 
-        card.setMinimumHeight(115)
+        card.setMinimumHeight(234)
         return card
 
     @staticmethod
@@ -652,25 +625,11 @@ class MainWindow(QWidget):
         self.listen_others_switch.toggled.connect(self._on_listen_others_toggled)
         self._apply_listen_others(self.listen_others_switch.isChecked())
 
-        self.received_advanced_btn = QPushButton()
-        self.received_advanced_btn.setObjectName("GhostAccent")  # destacado — botao importante, abre toda a config. da fala recebida
-        self.received_advanced_btn.setCheckable(True)
-        self.received_advanced_btn.setCursor(Qt.PointingHandCursor)
-        self.received_advanced_btn.setFixedHeight(32)
-        self.received_advanced_btn.setToolTip(
-            "Abre as configurações da fala recebida: dispositivo/aplicativo de áudio, "
-            "idiomas candidatos, teste de áudio, voz, overlay e sincronização de mute"
-        )
-        self.received_advanced_btn.setChecked(self.settings_open)
-        self._update_settings_button_text()
-        self.received_advanced_btn.toggled.connect(self._on_advanced_settings_toggled)
-        content.addWidget(self.received_advanced_btn)
-
-        card.setMinimumHeight(260)
+        card.setMinimumHeight(178)
         return card
 
     def _update_settings_button_text(self):
-        self.received_advanced_btn.setText("⚙  Ocultar configurações" if self.settings_open else "⚙  Mostrar configurações")
+        self.received_advanced_btn.setText("⚙  OCULTAR CONFIGURAÇÕES" if self.settings_open else "⚙  MOSTRAR CONFIGURAÇÕES")
 
     def _build_settings_panel(self):
         """Painel lateral com tudo que e configurado uma vez e raramente
@@ -682,7 +641,7 @@ class MainWindow(QWidget):
         panel.setFixedWidth(SETTINGS_PANEL_WIDTH)
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(10)
+        layout.setSpacing(6)
         settings = self._settings
 
         card, content = make_card("Fala Recebida — Config.")
@@ -813,10 +772,11 @@ class MainWindow(QWidget):
         self._apply_received_tts_output()
         self.received_tts_output_combo.currentTextChanged.connect(self._on_received_tts_output_changed)
 
-        card.setMinimumHeight(280)
+        card.setMinimumHeight(250)
         layout.addWidget(card)
 
         overlay_card, overlay_content = make_card("Overlay & VRChat")
+        overlay_content.setSpacing(2)
 
         overlay_enabled = settings.get("overlay_enabled", False)
         self.overlay_switch = self._toggle_row(
@@ -832,7 +792,7 @@ class MainWindow(QWidget):
         self.overlay_settings_box = QWidget()
         overlay_settings_layout = QVBoxLayout(self.overlay_settings_box)
         overlay_settings_layout.setContentsMargins(0, 0, 0, 0)
-        overlay_settings_layout.setSpacing(10)
+        overlay_settings_layout.setSpacing(6)
         self.overlay_settings_box.setVisible(overlay_enabled)
         overlay_content.addWidget(self.overlay_settings_box)
 
@@ -896,7 +856,7 @@ class MainWindow(QWidget):
         self.overlay_mgr.enabled = self.overlay_switch.isChecked()
         self._apply_overlay_backend()
 
-        overlay_card.setMinimumHeight(280)
+        overlay_card.setMinimumHeight(250)
         layout.addWidget(overlay_card)
         layout.addStretch(1)
 
@@ -904,37 +864,58 @@ class MainWindow(QWidget):
 
     def _build_action_buttons(self):
         col = QVBoxLayout()
-        col.setSpacing(8)
+        col.setSpacing(7)
 
         self.start_btn = QPushButton("INICIAR TRADUÇÃO")
         self.start_btn.setCursor(Qt.PointingHandCursor)
         self.start_btn.setStyleSheet(PRIMARY_BTN_QSS)
-        self.start_btn.setFixedHeight(47)
+        self.start_btn.setFixedHeight(44)
         self.start_btn.setToolTip("Iniciar ou parar a tradução (Ctrl+Espaço)")
         self.start_btn.clicked.connect(self.toggle_service)
         col.addWidget(self.start_btn)
 
-        self.clear_btn = QPushButton("Limpar Chatbox do VRChat")
-        self.clear_btn.setObjectName("Ghost")
-        self.clear_btn.setCursor(Qt.PointingHandCursor)
-        self.clear_btn.setFixedHeight(39)
-        self.clear_btn.setToolTip("Envia uma mensagem vazia para limpar o chatbox atual do VRChat")
-        self.clear_btn.clicked.connect(self.clear_chatbox)
-        col.addWidget(self.clear_btn)
+        # Mesmo destaque estrutural do "Iniciar Tradução" (altura/largura/peso
+        # de fonte), mas em cor propria (roxo, ja associado a "fala recebida"
+        # em toda a UI) pra continuar lendo como acao secundaria, so que com
+        # presenca visual forte — antes vivia pequeno dentro do card "Recursos".
+        self.received_advanced_btn = QPushButton()
+        self.received_advanced_btn.setObjectName("GhostAccent")
+        self.received_advanced_btn.setCheckable(True)
+        self.received_advanced_btn.setCursor(Qt.PointingHandCursor)
+        self.received_advanced_btn.setFixedHeight(44)
+        self.received_advanced_btn.setToolTip(
+            "Abre as configurações da fala recebida: dispositivo/aplicativo de áudio, "
+            "idiomas candidatos, teste de áudio, voz, overlay e sincronização de mute"
+        )
+        self.received_advanced_btn.setChecked(self.settings_open)
+        self._update_settings_button_text()
+        self.received_advanced_btn.toggled.connect(self._on_advanced_settings_toggled)
+        col.addWidget(self.received_advanced_btn)
 
+        # "Abrir conversa" tambem ganha destaque (cor de acento + icone) em vez
+        # do cinza neutro do "Ghost" padrao — e a acao mais usada durante o uso
+        # normal do app, nao devia competir visualmente com "Limpar Chatbox".
         self.open_panel_btn = QPushButton()
-        self.open_panel_btn.setObjectName("Ghost")
+        self.open_panel_btn.setObjectName("GhostBlue")
         self.open_panel_btn.setCursor(Qt.PointingHandCursor)
-        self.open_panel_btn.setFixedHeight(39)
+        self.open_panel_btn.setFixedHeight(40)
         self.open_panel_btn.setToolTip("Abrir ou fechar o painel de conversa (Ctrl+L)")
         self.open_panel_btn.clicked.connect(self._toggle_conversation_panel)
         col.addWidget(self.open_panel_btn)
         self._update_panel_button_text()
 
+        self.clear_btn = QPushButton("Limpar Chatbox do VRChat")
+        self.clear_btn.setObjectName("Ghost")
+        self.clear_btn.setCursor(Qt.PointingHandCursor)
+        self.clear_btn.setFixedHeight(34)
+        self.clear_btn.setToolTip("Envia uma mensagem vazia para limpar o chatbox atual do VRChat")
+        self.clear_btn.clicked.connect(self.clear_chatbox)
+        col.addWidget(self.clear_btn)
+
         return col
 
     def _update_panel_button_text(self):
-        self.open_panel_btn.setText("◂  FECHAR CONVERSA" if self.panel_open else "▸  ABRIR CONVERSA")
+        self.open_panel_btn.setText("💬 ◂  FECHAR CONVERSA" if self.panel_open else "💬 ▸  ABRIR CONVERSA")
 
     # ── janela compacta / expansivel ────────────────────────────────────────
 

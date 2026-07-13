@@ -119,15 +119,27 @@ QPushButton#Ghost:focus {{ border-color: {ACCENT}; }}
 
 QPushButton#GhostAccent {{
     background-color: {RECEIVED_SOFT};
-    border: 1px solid {RECEIVED_ACCENT};
-    border-radius: 10px;
+    border: 2px solid {RECEIVED_ACCENT};
+    border-radius: 20px;
     color: {RECEIVED_ACCENT};
-    padding: 8px;
+    padding: 10px;
     font-weight: 700;
+    font-size: 10.5pt;
 }}
 QPushButton#GhostAccent:hover {{ background-color: {RECEIVED_ACCENT}; color: white; }}
 QPushButton#GhostAccent:pressed {{ background-color: {RECEIVED_ACCENT}; color: white; }}
 QPushButton#GhostAccent:checked {{ background-color: {RECEIVED_ACCENT}; color: white; }}
+
+QPushButton#GhostBlue {{
+    background-color: {ACCENT_SOFT};
+    border: 1px solid {ACCENT};
+    border-radius: 14px;
+    color: {ACCENT};
+    padding: 9px;
+    font-weight: 700;
+}}
+QPushButton#GhostBlue:hover {{ background-color: {ACCENT}; color: white; }}
+QPushButton#GhostBlue:pressed {{ background-color: {ACCENT_HOVER}; color: white; }}
 
 QPushButton#IconGhost {{
     background-color: transparent;
@@ -290,15 +302,15 @@ def make_card(title: str):
     frame = QFrame()
     frame.setObjectName("Card")
     outer = QVBoxLayout(frame)
-    outer.setContentsMargins(14, 5, 14, 5)
-    outer.setSpacing(4)
+    outer.setContentsMargins(14, 4, 14, 4)
+    outer.setSpacing(3)
 
     lbl = QLabel(title.upper())
     lbl.setObjectName("CardTitle")
     outer.addWidget(lbl)
 
     content = QVBoxLayout()
-    content.setSpacing(4)
+    content.setSpacing(3)
     outer.addLayout(content)
     return frame, content
 
