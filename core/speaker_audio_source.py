@@ -20,6 +20,7 @@ padrao. Reconecta sozinho por nome de executavel se o app fechar/reabrir.
 import os
 import struct
 import subprocess
+import sys
 import threading
 from abc import ABC, abstractmethod
 from typing import Callable, Optional
@@ -38,7 +39,16 @@ READER_CHUNK_BYTES = 4096
 
 
 def default_helper_path() -> str:
-    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    # Empacotado (PyInstaller): o auxiliar nativo vai embutido DENTRO do
+    # proprio .exe (--add-binary) e e extraido em sys._MEIPASS a cada
+    # execucao — uma pasta temporaria por execucao, diferente de onde o
+    # SETTINGS_FILE mora (que precisa ficar estavel do lado do .exe pra
+    # persistir entre sessoes, ver ui/app.py). Rodando a partir do
+    # codigo-fonte, continua relativo a este arquivo, igual sempre foi.
+    if getattr(sys, "frozen", False):
+        root = getattr(sys, "_MEIPASS", os.path.dirname(sys.executable))
+    else:
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     return os.path.join(root, "bin", "app_loopback_capture.exe")
 
 

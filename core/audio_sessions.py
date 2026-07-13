@@ -78,19 +78,38 @@ def list_audio_session_apps() -> List[AudioSessionApp]:
 
 
 def find_pid_by_executable(executable_name: str) -> Optional[int]:
-    """Thread-safe pra qualquer thread (so psutil, sem COM). Primeiro
-    processo vivo encontrado com esse nome de executavel vence."""
+    """Thread-safe pra qualquer thread (so psutil, sem COM).
+
+    Apps multi-processo (Electron/Chromium — Discord, navegadores, etc.) tem
+    VARIOS processos com o MESMO nome de executavel (um principal + varios
+    filhos de renderizacao/GPU/utilitario); so um deles produz audio de
+    verdade, e nao e garantido ser o primeiro que o psutil.process_iter()
+    encontra (ordem arbitraria). Como a captura por processo do auxiliar
+    nativo usa PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE (cobre o PID
+    escolhido + toda a arvore de filhos), mirar na RAIZ da arvore — o
+    processo cujo pai NAO e o mesmo executavel — garante cobrir todos os
+    processos-filho de uma vez, em vez de arriscar escolher um "primo" fora
+    da sub-arvore certa. Pra apps de processo unico (ex: VRChat.exe) isso
+    nao muda nada, ja que so ha um candidato."""
     target = (executable_name or "").lower()
     if not target:
         return None
     try:
-        for proc in psutil.process_iter(["pid", "name"]):
+        candidates = []
+        for proc in psutil.process_iter(["pid", "name", "ppid"]):
             try:
                 name = proc.info.get("name") or ""
             except Exception:
                 continue
             if name.lower() == target:
-                return proc.info.get("pid")
+                candidates.append(proc.info)
+        if not candidates:
+            return None
+        pids = {c["pid"] for c in candidates}
+        for c in candidates:
+            if c.get("ppid") not in pids:
+                return c["pid"]
+        return candidates[0]["pid"]
     except Exception:
         pass
     return None

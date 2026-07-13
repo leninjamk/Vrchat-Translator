@@ -38,7 +38,15 @@ from ui.widgets import (
 )
 from ui.history_panel import HistoryPanel
 
-SETTINGS_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "settings.json")
+# Empacotado (PyInstaller): __file__ resolve pra dentro de _internal/, mas
+# queremos o settings.json visivel ao lado do .exe principal — usa
+# sys.executable nesse caso. Rodando a partir do codigo-fonte, continua
+# relativo a este arquivo, igual sempre foi.
+if getattr(sys, "frozen", False):
+    _APP_ROOT = os.path.dirname(sys.executable)
+else:
+    _APP_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+SETTINGS_FILE = os.path.join(_APP_ROOT, "settings.json")
 
 # O painel esquerdo (controles) tem largura FIXA sempre. A ALTURA da janela
 # tambem e sempre a MESMA (calculada uma unica vez a partir do sizeHint do
