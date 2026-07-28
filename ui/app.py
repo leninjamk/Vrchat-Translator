@@ -146,6 +146,11 @@ class MainWindow(QWidget):
         self._animating = False
         self._active_anim = None
         self._vrchat_muted = False
+        # Rede de seguranca contra o Qt/Windows reposicionar/redimensionar a
+        # janela sozinho durante a animacao de largura (ver moveEvent/
+        # resizeEvent e _enforce_anim_geometry, usados por _animate_to_width).
+        self._anim_expected_geometry = None
+        self._correcting_geometry = False
 
         self.setWindowTitle("VRChat Speech Translator — By: LeNinjaMK")
         self.setStyleSheet(STYLESHEET)
@@ -937,6 +942,34 @@ class MainWindow(QWidget):
             width += CONVERSATION_WIDTH_DELTA
         return width
 
+    def _min_required_height(self):
+        """Maior altura que a janela genuinamente precisa AGORA, dado o
+        conteudo REAL e atual do left_container, do settings_panel e do
+        history_panel. O conteudo do settings_panel e dinamico (ex.:
+        overlay_settings_box liga/desliga independente do painel estar
+        aberto ou fechado — ver _on_overlay_toggled), entao isso precisa
+        ser reavaliado toda vez que um painel vai abrir, nao so uma vez
+        no startup (ver _ensure_fixed_height)."""
+        needed_left = self.left_container.sizeHint().height()
+        needed_settings = self.settings_panel.layout().sizeHint().height()
+        needed_history = self.history_panel.sizeHint().height()
+        return max(needed_left, needed_settings, needed_history) + self._chrome_height
+
+    def _ensure_fixed_height(self):
+        """Chamado logo ANTES de cada animacao de abertura, antes de
+        show_before()/setVisible(True) e antes de qualquer setGeometry. Se
+        o conteudo real agora exigir mais altura do que self._fixed_height
+        tem congelada, cresce self._fixed_height UMA VEZ aqui. Assim,
+        quando o painel oculto vira visivel, o Qt nao encontra nada pra
+        "corrigir" sozinho no meio da animacao — o pulo de altura e
+        eliminado na raiz, em vez de tentarmos vencer uma corrida contra o
+        auto-resize do layout do Qt depois do fato. So CRESCE, nunca
+        encolhe (evita a janela diminuir sozinha e cortar conteudo que uma
+        abertura anterior ja precisou)."""
+        needed = self._min_required_height()
+        if needed > self._fixed_height:
+            self._fixed_height = needed
+
     def _finalize_initial_size(self):
         # 1) assenta a geometria compacta primeiro (paineis extras ainda ocultos) —
         #    a altura calculada aqui e DEFINITIVA e nunca mais muda em runtime.
@@ -951,12 +984,10 @@ class MainWindow(QWidget):
         # corrige aqui em vez de reajustar margens/espacamento de cada card
         # toda vez que um campo novo e adicionado no futuro. "chrome" e o
         # espaco que a janela gasta fora do left_container (cabecalho,
-        # margens) — usado pra saber quanto o settings_panel (oculto agora,
-        # mas com sizeHint() ja valido) vai precisar de janela quando abrir.
-        chrome = height - self.left_container.height()
-        needed_for_left = self.left_container.sizeHint().height() + chrome
-        needed_for_settings = self.settings_panel.layout().sizeHint().height() + chrome
-        height = max(height, needed_for_left, needed_for_settings)
+        # margens) — guardado pra _min_required_height() reusar sempre que
+        # precisar reavaliar a altura (ver _ensure_fixed_height).
+        self._chrome_height = height - self.left_container.height()
+        height = max(height, self._min_required_height())
 
         self.setFixedSize(COMPACT_WIDTH, height)
         self._fixed_height = height
@@ -1059,8 +1090,29 @@ class MainWindow(QWidget):
                 on_finished()
             return
 
-        right_edge = self._current_pos.x() + start_width
-        y = self._current_pos.y()
+        # Le a posicao AO VIVO via self.geometry() — NAO via self.pos()/
+        # self.x()/self.y() nem via self._current_pos. Descobrimos (nesta
+        # mesma investigacao) que, neste ambiente Qt/Windows, self.pos()
+        # fica preso no valor pedido pra self.move() de antes da janela ser
+        # mostrada de verdade e NUNCA se atualiza sozinho, enquanto
+        # self.geometry() reflete a posicao real da area util — as duas
+        # podem divergir por dezenas de pixels (a altura da barra de
+        # titulo) o tempo todo. setGeometry()/geometry() sao consistentes
+        # entre si; setGeometry(x,y,...) seguido de geometry() devolve
+        # exatamente (x,y,...). Usar self.pos() aqui alimentava
+        # setGeometry() com uma posicao ja errada, e cada nova animacao
+        # comecava a partir desse erro — exatamente o pulo relatado.
+        geo = self.geometry()
+        right_edge = geo.x() + start_width
+        y = geo.y()
+
+        # Revalida a altura ANTES de mostrar o painel oculto e ANTES de
+        # qualquer chamada de geometria desta animacao (ver
+        # _ensure_fixed_height) — sem isso, self._fixed_height podia estar
+        # desatualizado (ex.: overlay ligado depois do startup) e o Qt
+        # tentava "corrigir" sozinho no meio da animacao, causando o pulo
+        # de altura reportado.
+        self._ensure_fixed_height()
         height = self._fixed_height
 
         lo = min(start_width, target_width)
@@ -1068,11 +1120,22 @@ class MainWindow(QWidget):
         self.setMinimumSize(lo, height)
         self.setMaximumSize(hi, height)
 
+        # Liga a rede de seguranca (ver moveEvent/resizeEvent/
+        # _enforce_anim_geometry) ANTES de show_before(): fazer um painel
+        # oculto ficar visivel pode, sozinho, disparar um reposicionamento/
+        # redimensionamento do Qt/Windows que nem sequer passa pelas nossas
+        # chamadas explicitas de setGeometry — na pratica isso se manifestava
+        # como a janela "subir" alguns pixels durante a animacao e so voltar
+        # ao lugar certo quando _finish() reimpunha a geometria no final.
+        # Com a rede ativa desde ja, qualquer moveEvent/resizeEvent fora do
+        # esperado e corrigido no mesmo ciclo, antes do usuario notar.
+        self._animating = True
+        self._anim_expected_geometry = (right_edge - start_width, y, start_width, height)
+
         if show_before:
             show_before()
-        self.setGeometry(right_edge - start_width, y, start_width, height)
+        self.setGeometry(*self._anim_expected_geometry)
 
-        self._animating = True
         self.open_panel_btn.setEnabled(False)
         self.received_advanced_btn.setEnabled(False)
 
@@ -1084,7 +1147,8 @@ class MainWindow(QWidget):
 
         def _apply(value):
             w = int(value)
-            self.setGeometry(right_edge - w, y, w, height)
+            self._anim_expected_geometry = (right_edge - w, y, w, height)
+            self.setGeometry(*self._anim_expected_geometry)
 
         anim.valueChanged.connect(_apply)
 
@@ -1099,11 +1163,13 @@ class MainWindow(QWidget):
             if screen:
                 min_x = screen.availableGeometry().x()
                 final_x = max(final_x, min_x)
+            self._anim_expected_geometry = (final_x, y, target_width, height)
             self.setFixedSize(target_width, height)
             self.move(final_x, y)
             self._current_width = target_width
             self._current_pos = QPoint(final_x, y)
             self._animating = False
+            self._anim_expected_geometry = None
             self.open_panel_btn.setEnabled(True)
             self.received_advanced_btn.setEnabled(True)
             if on_finished:
@@ -1112,6 +1178,33 @@ class MainWindow(QWidget):
         anim.finished.connect(_finish)
         self._active_anim = anim
         anim.start()
+
+    def _enforce_anim_geometry(self):
+        """Chamado de moveEvent/resizeEvent enquanto uma animacao de
+        largura esta rolando: se o Qt/Windows moveu ou redimensionou a
+        janela pra fora do que _animate_to_width pediu por ultimo, corrige
+        de volta no mesmo ciclo — rede de seguranca contra o pulo de altura/
+        posicao descrito em _animate_to_width."""
+        if self._correcting_geometry or not self._animating or self._anim_expected_geometry is None:
+            return
+        # Compara via geometry() — self.x()/self.y() nao sao confiaveis
+        # neste ambiente Qt/Windows (ver comentario no topo de
+        # _animate_to_width); usa-los aqui faria esta funcao "corrigir"
+        # a cada moveEvent/resizeEvent mesmo sem nada de errado.
+        actual = self.geometry()
+        expected = self._anim_expected_geometry
+        if (actual.x(), actual.y(), actual.width(), actual.height()) != expected:
+            self._correcting_geometry = True
+            self.setGeometry(*expected)
+            self._correcting_geometry = False
+
+    def moveEvent(self, event):
+        super().moveEvent(event)
+        self._enforce_anim_geometry()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._enforce_anim_geometry()
 
     # ── persistencia ─────────────────────────────────────────────────────
 
@@ -1563,10 +1656,17 @@ class MainWindow(QWidget):
         self.overlay_mgr.enabled = checked
         if not checked:
             self.overlay_mgr.hide()
-        # o painel de configuracoes tem largura FIXA (SETTINGS_PANEL_WIDTH) e
-        # altura sobrando — mostrar/esconder este bloco nunca precisa
-        # redimensionar a janela, so o layout interno do painel.
         self.overlay_settings_box.setVisible(checked)
+        # Este switch mora DENTRO do settings_panel — dá pra ligar/desligar
+        # com o painel ja aberto (janela em repouso, fora de qualquer
+        # animacao). Isso muda a altura real que o settings_panel precisa
+        # (overlay_settings_box soma ~6 linhas), entao revalida aqui tambem
+        # — nao so em _animate_to_width — senao a proxima abertura carrega
+        # uma self._fixed_height desatualizada e o pulo de altura volta.
+        if self.settings_open and not self._animating:
+            self._ensure_fixed_height()
+            if self.height() != self._fixed_height:
+                self.setFixedSize(self._current_width, self._fixed_height)
         self._persist_settings()
 
     def _on_overlay_always_visible_toggled(self, checked):
