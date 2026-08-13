@@ -482,7 +482,7 @@ class MainWindow(QWidget):
 
         self.pitch_slider = self._build_labeled_slider(
             content, "Pitch (tom de voz)", -50, 50, 0,
-            tooltip="Ajusta o tom da voz sintetizada (grave a agudo) — não afeta vozes Kokoro",
+            tooltip="Ajusta o tom da voz sintetizada (grave a agudo)",
         )
         hint_row = QHBoxLayout()
         grave = QLabel("Grave")

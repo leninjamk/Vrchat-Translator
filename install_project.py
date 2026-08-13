@@ -8,17 +8,46 @@ import subprocess
 import shutil
 
 
+# Versoes mais novas que essa ficam de fora de proposito: pacotes nativos
+# (pyaudiowpatch, numpy...) nem sempre tem wheel pronta pra Python recem-
+# lancado, e sem isso o pip tenta COMPILAR do zero - o que exige Visual C++
+# Build Tools que quase ninguem tem instalado, e quebra a instalacao inteira
+# com um erro confuso (ja aconteceu de verdade com um usuario em Python 3.14).
+MIN_PY_VERSION = (3, 9)
+MAX_PY_VERSION = (3, 12)
+
+
+def _version_ok(major, minor):
+    return MIN_PY_VERSION <= (major, minor) <= MAX_PY_VERSION
+
+
+def _remote_version(python_exe):
+    """Pergunta pro proprio interpretador sua versao (major, minor) - funciona
+    pra qualquer python.exe candidato, nao so pro que esta rodando este script."""
+    try:
+        r = subprocess.run(
+            [python_exe, "-c", "import sys; print(sys.version_info[0], sys.version_info[1])"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if r.returncode == 0:
+            major, minor = r.stdout.split()
+            return int(major), int(minor)
+    except Exception:
+        pass
+    return None
+
+
 def get_python_exe():
     """
-    Localiza um Python 3.9+ valido no sistema.
-    Ignora o alias da Microsoft Store (WindowsApps).
+    Localiza um Python com versao suportada (MIN_PY_VERSION..MAX_PY_VERSION)
+    no sistema. Ignora o alias da Microsoft Store (WindowsApps).
     """
     local_app_data  = os.environ.get("LOCALAPPDATA", "")
     program_files   = os.environ.get("ProgramFiles", "")
     program_files86 = os.environ.get("ProgramFiles(x86)", "")
     user_profile    = os.environ.get("USERPROFILE", "")
 
-    versions = ["313", "312", "311", "310", "39"]
+    versions = ["312", "311", "310", "39"]
     candidates = []
 
     for v in versions:
@@ -35,20 +64,17 @@ def get_python_exe():
             return path
 
     # Executavel atual (se rodar via outro Python valido)
-    if sys.version_info >= (3, 9) and "WindowsApps" not in sys.executable:
+    if _version_ok(*sys.version_info[:2]) and "WindowsApps" not in sys.executable:
         return sys.executable
 
-    # Ultimo recurso: python no PATH, excluindo alias da Store
+    # Ultimo recurso: python no PATH, excluindo alias da Store - so aceita se
+    # a versao encontrada realmente tiver suporte (ver MAX_PY_VERSION acima).
     for cmd in ("python", "python3"):
         found = shutil.which(cmd)
         if found and "WindowsApps" not in found:
-            try:
-                r = subprocess.run([found, "--version"],
-                                   capture_output=True, text=True, timeout=5)
-                if r.returncode == 0:
-                    return found
-            except Exception:
-                pass
+            version = _remote_version(found)
+            if version and _version_ok(*version):
+                return found
 
     return None
 
@@ -178,35 +204,7 @@ def main():
         print("    Se persistir, verifique sua conexao com a internet.")
         sys.exit(1)
 
-    # ── 6. Voz local Kokoro (OPCIONAL, gratuita, melhor qualidade) ─────────────
-    # Best-effort de proposito: as dependencias essenciais ja instalaram com
-    # sucesso acima (nunca chega aqui se o passo 5 falhou). Se o Kokoro nao
-    # instalar (Python >=3.13, sem internet, etc.), o app funciona normal
-    # com o edge-tts de sempre — so nao mostra as vozes Kokoro extras.
-    #
-    # De proposito SEM os extras "misaki[ja,zh]" (vozes japonesa/mandarim do
-    # Kokoro) aqui: eles puxam o pacote pyopenjtalk, que precisa COMPILAR uma
-    # extensao nativa (exige Visual Studio instalado) — a grande maioria dos
-    # usuarios nao tem isso, e incluir esses extras no MESMO comando faz o
-    # pip falhar a instalacao INTEIRA (nada instala, nem o Kokoro basico).
-    # As vozes Kokoro de portugues/ingles/espanhol/frances/italiano/hindi nao
-    # precisam disso e instalam normal. Sem o pyopenjtalk, as vozes japonesa/
-    # mandarim do Kokoro especificamente ficam indisponiveis e caem sozinhas
-    # pro edge-tts (ver core/tts.py) — quem quiser essas duas pode instalar
-    # manualmente depois com Visual Studio Build Tools + "misaki[ja,zh]".
-    print("[*] Instalando voz local Kokoro (opcional, pode ser pulado)...")
-    kokoro_result = subprocess.run(
-        [venv_python, "-m", "pip", "install", "kokoro", "misaki", "soundfile", "--quiet"],
-        capture_output=True, text=True,
-    )
-    if kokoro_result.returncode == 0:
-        print("[OK] Voz local Kokoro instalada!")
-    else:
-        print("    [!] Voz local Kokoro não instalada (opcional — o app")
-        print("        continua funcionando normal com as vozes de sempre).")
-    print()
-
-    # ── 7. Sucesso ────────────────────────────────────────────────────────────
+    # ── 6. Sucesso ────────────────────────────────────────────────────────────
     print()
     print("=" * 51)
     print("[OK] INSTALACAO CONCLUIDA COM SUCESSO!")

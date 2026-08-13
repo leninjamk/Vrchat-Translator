@@ -74,13 +74,34 @@ def _render_text_image(text: str, font_size: int) -> Image.Image:
 
 class OpenVROverlayBackend:
     def __init__(self):
-        self._lock = threading.Lock()
+        # RLock (não Lock comum) de propósito: initialize()/show_text() já
+        # chamam _teardown_locked() de DENTRO do próprio "with self._lock",
+        # e várias threads mexem nesse estado ao mesmo tempo (poll de
+        # SteamVR a cada alguns segundos numa thread do executor + minha
+        # fala numa thread + fala recebida em outra, todas podendo chamar
+        # show_text()/is_available() concorrentemente) — sem lock respeitado
+        # em TODO lugar que toca self._overlay/_handle/_initialized, um
+        # teardown no meio de um show_text() de outra thread gerava
+        # AttributeError silencioso e reinicialização espúria do overlay
+        # (bug real, corrigido aqui).
+        self._lock = threading.RLock()
         self._vr_system = None
         self._overlay = None
         self._handle: Optional[int] = None
         self._initialized = False
         self._init_error: Optional[str] = None
         self._hide_timer: Optional[threading.Timer] = None
+        # threading.Timer.cancel() so tem efeito se o callback ainda nao
+        # comecou a rodar na thread propria dele; se o timer ja disparou bem
+        # na hora que _reset_hide_timer()/hide_now() e chamado, cancel() nao
+        # faz nada e o hide_now "fantasma" fica esperando self._lock — quando
+        # finalmente entra, pode cancelar/derrubar um timer/estado JA NOVO
+        # (ex.: texto novo mostrado por show_text() escondido na hora,
+        # mesmo pedindo pra ficar visivel por mais tempo). Corrigido com um
+        # contador de geracao: cada nova chamada invalida qualquer callback
+        # de timer antigo ainda em voo (mesmo padrao ja usado em
+        # core/speaker_loopback.py para threads obsoletas).
+        self._hide_generation = 0
 
     # ── ciclo de vida ────────────────────────────────────────────────────
 
@@ -106,11 +127,12 @@ class OpenVROverlayBackend:
                 return False
 
     def is_available(self) -> bool:
-        if self._initialized and self._steamvr_still_running():
-            return True
+        with self._lock:
+            if self._initialized and self._steamvr_still_running_locked():
+                return True
         return self.initialize()
 
-    def _steamvr_still_running(self) -> bool:
+    def _steamvr_still_running_locked(self) -> bool:
         try:
             event = openvr.VREvent_t()
             while self._vr_system.pollNextEvent(event):
@@ -136,52 +158,81 @@ class OpenVROverlayBackend:
         if len(lines) > max_lines:
             lines = lines[-max_lines:]
 
+        # Renderiza a imagem (PIL puro) FORA do lock — não toca estado do
+        # OpenVR, só CPU; segurar o lock aqui só aumentaria contenção à toa.
         img = _render_text_image("\n".join(lines), font_size=int(font_size * 1.7))
         data = img.tobytes()
         buf = (ctypes.c_char * len(data)).from_buffer_copy(data)
 
-        try:
-            self._overlay.setOverlayWidthInMeters(self._handle, max(0.3, scale))
-            self._overlay.setOverlayAlpha(self._handle, max(0.05, min(opacity, 1.0)))
-            self._overlay.setOverlayRaw(self._handle, buf, img.width, img.height, 4)
-            self._overlay.showOverlay(self._handle)
-        except Exception as e:
-            self._init_error = str(e)
-            self._teardown_locked()
-            return
+        with self._lock:
+            if not self._initialized or self._overlay is None or self._handle is None:
+                return  # desligou/desconectou entre o is_available() e aqui
+            try:
+                self._overlay.setOverlayWidthInMeters(self._handle, max(0.3, scale))
+                self._overlay.setOverlayAlpha(self._handle, max(0.05, min(opacity, 1.0)))
+                self._overlay.setOverlayRaw(self._handle, buf, img.width, img.height, 4)
+                self._overlay.showOverlay(self._handle)
+            except Exception as e:
+                self._init_error = str(e)
+                self._teardown_locked()
+                return
 
         self._reset_hide_timer(duration_seconds, always_visible)
 
     def _reset_hide_timer(self, duration_seconds, always_visible):
-        if self._hide_timer is not None:
-            self._hide_timer.cancel()
-            self._hide_timer = None
-        if not always_visible:
-            self._hide_timer = threading.Timer(max(duration_seconds, 0.5), self.hide_now)
-            self._hide_timer.daemon = True
-            self._hide_timer.start()
+        with self._lock:
+            self._hide_generation += 1
+            if self._hide_timer is not None:
+                self._hide_timer.cancel()
+                self._hide_timer = None
+            if not always_visible:
+                gen = self._hide_generation
+                self._hide_timer = threading.Timer(max(duration_seconds, 0.5), self._on_hide_timer_fired, args=(gen,))
+                self._hide_timer.daemon = True
+                self._hide_timer.start()
 
     def set_always_visible(self, always_visible: bool, duration_seconds: float = 6.0):
         """Mesma logica do backend de desktop: reage ao switch na hora,
         em vez de esperar a proxima fala pra comecar a contar o tempo."""
-        if always_visible:
+        with self._lock:
+            if always_visible:
+                self._hide_generation += 1
+                if self._hide_timer is not None:
+                    self._hide_timer.cancel()
+                    self._hide_timer = None
+            elif self._hide_timer is None:
+                self._hide_generation += 1
+                gen = self._hide_generation
+                self._hide_timer = threading.Timer(max(duration_seconds, 0.5), self._on_hide_timer_fired, args=(gen,))
+                self._hide_timer.daemon = True
+                self._hide_timer.start()
+
+    def _on_hide_timer_fired(self, generation: int):
+        """Alvo do threading.Timer — nunca chamado diretamente. Descarta
+        callbacks de timers ja obsoletos (ver comentario em __init__)."""
+        with self._lock:
+            if generation != self._hide_generation:
+                return
+            self._hide_timer = None
+            if self._initialized and self._handle is not None:
+                try:
+                    self._overlay.hideOverlay(self._handle)
+                except Exception:
+                    pass
+
+    def hide_now(self):
+        """Esconde imediatamente por pedido explicito (nao e o callback do
+        timer) — sempre invalida qualquer timer pendente."""
+        with self._lock:
+            self._hide_generation += 1
             if self._hide_timer is not None:
                 self._hide_timer.cancel()
                 self._hide_timer = None
-        elif self._hide_timer is None:
-            self._hide_timer = threading.Timer(max(duration_seconds, 0.5), self.hide_now)
-            self._hide_timer.daemon = True
-            self._hide_timer.start()
-
-    def hide_now(self):
-        if self._hide_timer is not None:
-            self._hide_timer.cancel()
-            self._hide_timer = None
-        if self._initialized and self._handle is not None:
-            try:
-                self._overlay.hideOverlay(self._handle)
-            except Exception:
-                pass
+            if self._initialized and self._handle is not None:
+                try:
+                    self._overlay.hideOverlay(self._handle)
+                except Exception:
+                    pass
 
     def shutdown(self):
         self.hide_now()

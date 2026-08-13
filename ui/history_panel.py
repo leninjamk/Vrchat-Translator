@@ -354,7 +354,7 @@ class HistoryPanel(QFrame):
         self._autoscroll_btn.setText("▶ Retomar rolagem" if paused else "⏸ Pausar rolagem")
 
     def _export_txt(self):
-        if not self.store.entries:
+        if not self.store.list_entries():
             return
         path, _ = QFileDialog.getSaveFileName(self, "Exportar histórico", "conversa.txt", "Texto (*.txt)")
         if path:

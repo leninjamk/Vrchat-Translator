@@ -16,32 +16,39 @@ echo.
 echo [*] Procurando Python no sistema...
 set "PYTHON_EXE="
 
-if exist "%LOCALAPPDATA%\Programs\Python\Python313\python.exe" set "PYTHON_EXE=%LOCALAPPDATA%\Programs\Python\Python313\python.exe"
+:: Versoes mais novas que 3.12 ficam de fora de proposito: pacotes nativos
+:: (pyaudiowpatch, numpy...) nem sempre tem wheel pronta pra Python recem-
+:: lancado, e sem isso o pip tenta COMPILAR do zero - o que exige Visual C++
+:: Build Tools que quase ninguem tem instalado, e quebra a instalacao inteira
+:: (ja aconteceu de verdade com um usuario em Python 3.14).
 if "!PYTHON_EXE!"=="" if exist "%LOCALAPPDATA%\Programs\Python\Python312\python.exe" set "PYTHON_EXE=%LOCALAPPDATA%\Programs\Python\Python312\python.exe"
 if "!PYTHON_EXE!"=="" if exist "%LOCALAPPDATA%\Programs\Python\Python311\python.exe" set "PYTHON_EXE=%LOCALAPPDATA%\Programs\Python\Python311\python.exe"
 if "!PYTHON_EXE!"=="" if exist "%LOCALAPPDATA%\Programs\Python\Python310\python.exe" set "PYTHON_EXE=%LOCALAPPDATA%\Programs\Python\Python310\python.exe"
 if "!PYTHON_EXE!"=="" if exist "%LOCALAPPDATA%\Programs\Python\Python39\python.exe"  set "PYTHON_EXE=%LOCALAPPDATA%\Programs\Python\Python39\python.exe"
 
-if "!PYTHON_EXE!"=="" if exist "%ProgramFiles%\Python313\python.exe" set "PYTHON_EXE=%ProgramFiles%\Python313\python.exe"
 if "!PYTHON_EXE!"=="" if exist "%ProgramFiles%\Python312\python.exe" set "PYTHON_EXE=%ProgramFiles%\Python312\python.exe"
 if "!PYTHON_EXE!"=="" if exist "%ProgramFiles%\Python311\python.exe" set "PYTHON_EXE=%ProgramFiles%\Python311\python.exe"
 if "!PYTHON_EXE!"=="" if exist "%ProgramFiles%\Python310\python.exe" set "PYTHON_EXE=%ProgramFiles%\Python310\python.exe"
 if "!PYTHON_EXE!"=="" if exist "%ProgramFiles%\Python39\python.exe"  set "PYTHON_EXE=%ProgramFiles%\Python39\python.exe"
 
-if "!PYTHON_EXE!"=="" if exist "C:\Python313\python.exe" set "PYTHON_EXE=C:\Python313\python.exe"
 if "!PYTHON_EXE!"=="" if exist "C:\Python312\python.exe" set "PYTHON_EXE=C:\Python312\python.exe"
 if "!PYTHON_EXE!"=="" if exist "C:\Python311\python.exe" set "PYTHON_EXE=C:\Python311\python.exe"
 if "!PYTHON_EXE!"=="" if exist "C:\Python310\python.exe" set "PYTHON_EXE=C:\Python310\python.exe"
 if "!PYTHON_EXE!"=="" if exist "C:\Python39\python.exe"  set "PYTHON_EXE=C:\Python39\python.exe"
 
-:: Tenta o python do PATH (filtra alias da Microsoft Store)
+:: Tenta o python do PATH (filtra alias da Microsoft Store e versoes sem suporte)
 if "!PYTHON_EXE!"=="" (
     for /f "tokens=*" %%i in ('where python 2^>nul') do (
         if "!PYTHON_EXE!"=="" (
             echo %%i | findstr /i "WindowsApps" >nul 2>&1
             if !errorlevel! neq 0 (
-                "%%i" --version >nul 2>&1
-                if !errorlevel! == 0 set "PYTHON_EXE=%%i"
+                for /f "tokens=2" %%v in ('"%%i" --version 2^>^&1') do (
+                    set "PYVER=%%v"
+                    if "!PYVER:~0,3!"=="3.9" set "PYTHON_EXE=%%i"
+                    if "!PYVER:~0,4!"=="3.10" set "PYTHON_EXE=%%i"
+                    if "!PYVER:~0,4!"=="3.11" set "PYTHON_EXE=%%i"
+                    if "!PYVER:~0,4!"=="3.12" set "PYTHON_EXE=%%i"
+                )
             )
         )
     )
@@ -66,7 +73,6 @@ if "!PYTHON_EXE!"=="" (
         echo [X] ERRO: Nao foi possivel baixar o Python.
         echo     Verifique sua internet e tente de novo.
         echo.
-        pause
         exit /b 1
     )
 
@@ -80,7 +86,6 @@ if "!PYTHON_EXE!"=="" (
 
     if !PY_ERR! neq 0 if !PY_ERR! neq 3010 (
         echo [X] ERRO: Falha na instalacao do Python ^(codigo !PY_ERR!^).
-        pause
         exit /b 1
     )
 
@@ -94,7 +99,6 @@ if "!PYTHON_EXE!"=="" (
     if "!PYTHON_EXE!"=="" (
         echo [X] Python instalado mas nao localizado.
         echo     Reinicie o computador e execute o Install.bat novamente.
-        pause
         exit /b 1
     )
 )
@@ -108,46 +112,18 @@ echo.
 echo [*] Instalando dependencias do projeto...
 echo.
 
-"!PYTHON_EXE!" "%~dp0install_project.py"
+:: -u desliga o buffer de stdout/stderr do Python — sem isso, quando a saida
+:: e redirecionada pra um arquivo (em vez de um console de verdade, caso do
+:: Exec escondido do installer.iss), o Python junta varios prints num bloco
+:: so e escreve tudo de uma vez, fazendo o log da tela do instalador parecer
+:: travado por minutos e depois "despejar" tudo no final.
+"!PYTHON_EXE!" -u "%~dp0install_project.py"
 
 if !errorlevel! neq 0 (
     echo.
     echo [X] ERRO durante a instalacao das dependencias.
     echo     Veja a mensagem acima para mais detalhes.
-    pause
     exit /b 1
-)
-
-:: ─────────────────────────────────────────────────────────────────────────────
-::  PASSO 4: espeak-ng (OPCIONAL — habilita as vozes locais Kokoro, mais
-::  naturais). Best-effort: se isso falhar por qualquer motivo, o app
-::  continua funcionando 100% normal com as vozes de sempre, so sem as
-::  opcoes extras de voz local — por isso NUNCA usa "exit /b 1" aqui.
-:: ─────────────────────────────────────────────────────────────────────────────
-where espeak-ng >nul 2>&1
-if !errorlevel! == 0 (
-    echo [OK] espeak-ng ja estava instalado ^(vozes locais Kokoro disponiveis^).
-) else (
-    echo [*] Instalando voz local Kokoro - espeak-ng ^(opcional^)...
-
-    set "ESPEAK_URL=https://github.com/espeak-ng/espeak-ng/releases/latest/download/espeak-ng.msi"
-    set "ESPEAK_MSI=%TEMP%\espeak_ng_tradutor_setup.msi"
-
-    powershell -NoProfile -ExecutionPolicy Bypass -Command "try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; (New-Object Net.WebClient).DownloadFile('!ESPEAK_URL!', '!ESPEAK_MSI!') } catch { exit 1 }" >nul 2>&1
-
-    if !errorlevel! == 0 if exist "!ESPEAK_MSI!" (
-        msiexec /i "!ESPEAK_MSI!" /quiet /norestart >nul 2>&1
-        del "!ESPEAK_MSI!" >nul 2>&1
-
-        where espeak-ng >nul 2>&1
-        if !errorlevel! == 0 (
-            echo [OK] espeak-ng instalado! Vozes locais Kokoro disponiveis.
-        ) else (
-            echo     [!] espeak-ng nao instalou ^(opcional — as vozes de sempre continuam funcionando normal^).
-        )
-    ) else (
-        echo     [!] Nao foi possivel baixar o espeak-ng ^(opcional — as vozes de sempre continuam funcionando normal^).
-    )
 )
 echo.
 

@@ -113,6 +113,16 @@ class SpeakerRecognitionService:
         self._process_thread: Optional[threading.Thread] = None
         self._running = False
         self._recent_texts = {}
+        # Incrementado a cada start() — deixa uma thread de uma sessao
+        # ANTERIOR perceber que ficou obsoleta e se encerrar sozinha, mesmo
+        # que start()/stop() rapidos (comum trocando dispositivo/app) façam
+        # self._running virar False e True de novo antes dela notar. Sem
+        # isso a thread velha continuava rodando pra sempre, competindo com
+        # a nova pela fila (vazamento de thread, bug real corrigido aqui).
+        # Não precisa de join() bloqueante em start()/stop() (que rodam
+        # direto na coroutine do IPC — bloquear ali travaria o event loop
+        # inteiro): a thread velha só sai sozinha na próxima verificação.
+        self._generation = 0
 
         # Configuracao de VAD/segmentacao (todos ajustaveis pela UI)
         self.energy_threshold = 400.0
@@ -162,6 +172,9 @@ class SpeakerRecognitionService:
         if self._running:
             return False
 
+        self._generation += 1
+        my_generation = self._generation
+
         self._segment_queue = queue.Queue(maxsize=max(self.queue_max_size, 1))
         self._raw_queue = queue.Queue()  # fresco a cada start (evita sobra de uma sessao anterior)
 
@@ -170,14 +183,26 @@ class SpeakerRecognitionService:
             on_audio=self._on_source_audio,
             on_error=lambda msg, fatal: self._safe_call(self.on_error, msg, fatal),
             on_status=lambda msg: self._safe_call(self.on_source_status, msg),
-            on_ready=self._on_source_ready,
+            # "my_generation" (capturado agora, nao lido de self._generation
+            # na hora que on_ready dispara) - no modo "aplicativo especifico"
+            # (ApplicationAudioSource) on_ready pode demorar ate 5s pra
+            # disparar (esperando o app abrir/o header chegar), rodando numa
+            # thread de watchdog separada. Se start()/stop() rapidos
+            # acontecerem nesse meio tempo, sem capturar a geracao aqui essa
+            # chamada tardia pegava self._generation JA incrementado pela
+            # sessao nova e criava uma _vad_thread com o generation "certo"
+            # mas o sample_rate/channels da sessao ANTIGA - misturava formato
+            # de audio entre sessoes (achado real de revisao de codigo).
+            on_ready=lambda sr, ch, fpb: self._on_source_ready(sr, ch, fpb, my_generation),
         )
         if not ok:
             self._running = False
             return False
 
         self._source = source
-        self._process_thread = threading.Thread(target=self._process_loop, daemon=True)
+        self._process_thread = threading.Thread(
+            target=self._process_loop, args=(my_generation,), daemon=True,
+        )
         self._process_thread.start()
         return True
 
@@ -185,16 +210,18 @@ class SpeakerRecognitionService:
         if self._running:
             self._raw_queue.put(raw_bytes)
 
-    def _on_source_ready(self, sample_rate: int, channels: int, frames_per_buffer: int):
+    def _on_source_ready(self, sample_rate: int, channels: int, frames_per_buffer: int, generation: int):
         """Chamado (de qualquer thread) quando a fonte sabe o formato real do
         audio — so entao da pra iniciar o VAD. No modo 'aplicativo
         especifico' isso pode demorar (esperando o app abrir); ate la o
         _process_thread ja esta de pe, so ocioso (a fila de segmentos
         continua vazia)."""
+        if generation != self._generation:
+            return  # sessao que originou essa chamada ja ficou obsoleta
         if self._vad_thread is not None and self._vad_thread.is_alive():
             return
         self._vad_thread = threading.Thread(
-            target=self._vad_loop, args=(sample_rate, channels, frames_per_buffer), daemon=True,
+            target=self._vad_loop, args=(sample_rate, channels, frames_per_buffer, generation), daemon=True,
         )
         self._vad_thread.start()
 
@@ -216,15 +243,22 @@ class SpeakerRecognitionService:
             except queue.Empty:
                 break
 
-    def _vad_loop(self, sample_rate, channels, frames_per_buffer):
+    def _vad_loop(self, sample_rate, channels, frames_per_buffer, generation):
         speaking = False
         segment_chunks = []
         speech_duration = 0.0
         silence_duration = 0.0
         chunk_duration = frames_per_buffer / sample_rate
         last_level_emit = 0.0
+        # Mesma logica de "self._segment_queue" ja usada em _process_loop:
+        # captura a fila DESTA sessao uma vez, no inicio, em vez de ler
+        # "self._segment_queue" de novo la na frente (em _enqueue_segment) -
+        # se um start() novo trocar self._segment_queue enquanto esta thread
+        # ainda roda, ela continua enfileirando na fila PROPRIA em vez de
+        # vazar segmentos pra fila da sessao nova.
+        segment_queue = self._segment_queue
 
-        while self._running:
+        while self._running and generation == self._generation:
             try:
                 raw = self._raw_queue.get(timeout=0.2)
             except queue.Empty:
@@ -276,28 +310,35 @@ class SpeakerRecognitionService:
             self._safe_call(self.on_speech_ended)
 
             if total_duration >= self.min_speech_duration:
-                self._enqueue_segment(pcm, sample_rate)
+                self._enqueue_segment(segment_queue, pcm, sample_rate)
 
-    def _enqueue_segment(self, pcm_mono_bytes: bytes, sample_rate: int):
+    def _enqueue_segment(self, segment_queue: "queue.Queue[tuple]", pcm_mono_bytes: bytes, sample_rate: int):
         try:
-            self._segment_queue.put_nowait((pcm_mono_bytes, sample_rate))
+            segment_queue.put_nowait((pcm_mono_bytes, sample_rate))
             return
         except queue.Full:
             pass
         try:
-            self._segment_queue.get_nowait()
+            segment_queue.get_nowait()
         except queue.Empty:
             pass
         self._safe_call(self.on_error, "Fila de reconhecimento cheia — descartando o segmento mais antigo.", False)
         try:
-            self._segment_queue.put_nowait((pcm_mono_bytes, sample_rate))
+            segment_queue.put_nowait((pcm_mono_bytes, sample_rate))
         except queue.Full:
             pass
 
-    def _process_loop(self):
-        while self._running or not self._segment_queue.empty():
+    def _process_loop(self, generation):
+        # Guarda a REFERENCIA da fila desta sessao (nao le "self._segment_queue"
+        # de novo depois) - se um start() novo trocar self._segment_queue
+        # enquanto esta thread ainda esta viva, ela continua drenando a fila
+        # PROPRIA ate esvaziar, sem comecar a roubar itens da fila da sessao
+        # nova (era exatamente esse cenario que vazava threads pra sempre —
+        # bug real corrigido aqui, ver comentario de self._generation).
+        segment_queue = self._segment_queue
+        while (self._running and generation == self._generation) or not segment_queue.empty():
             try:
-                pcm_mono_bytes, sample_rate = self._segment_queue.get(timeout=0.5)
+                pcm_mono_bytes, sample_rate = segment_queue.get(timeout=0.5)
             except queue.Empty:
                 continue
             self._process_segment(pcm_mono_bytes, sample_rate)

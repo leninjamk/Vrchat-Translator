@@ -8,6 +8,7 @@ confundidas:
   - "received" -> fala de outra pessoa, capturada por loopback do audio
                   que o VRChat esta reproduzindo
 """
+import threading
 from dataclasses import dataclass
 from typing import Iterable, List, Optional
 
@@ -57,23 +58,43 @@ class HistoryStore:
     def __init__(self, max_entries: int = 500):
         self.max_entries = max_entries
         self.entries: List[HistoryEntry] = []
+        # add() e chamado de VARIAS threads ao mesmo tempo (loop do
+        # microfone + loop de fala recebida podem falar simultaneamente) -
+        # sem essa trava, o corte de "max_entries" (append + del fatiado)
+        # nao e atomico e pode ficar impreciso sob concorrencia real (race
+        # condition encontrada em revisao de codigo). search()/export_txt()
+        # tiram uma COPIA da lista sob a trava em vez de segurar ela durante
+        # toda a iteracao/I-O de disco.
+        self._lock = threading.Lock()
 
     def add(self, entry: HistoryEntry) -> int:
         """Adiciona uma entrada. Retorna quantas entradas antigas devem ser
         descartadas tambem na UI (0 se nenhuma)."""
-        self.entries.append(entry)
-        overflow = len(self.entries) - self.max_entries
-        if overflow > 0:
-            del self.entries[:overflow]
-        return max(overflow, 0)
+        with self._lock:
+            self.entries.append(entry)
+            overflow = len(self.entries) - self.max_entries
+            if overflow > 0:
+                del self.entries[:overflow]
+            return max(overflow, 0)
 
     def clear(self):
-        self.entries.clear()
+        with self._lock:
+            self.entries.clear()
+
+    def list_entries(self) -> List[HistoryEntry]:
+        """Copia segura de .entries pra quem for iterar fora desta classe
+        (ver service/ipc_server.py::h_history_list) — acessar self.entries
+        direto de outra thread tem a mesma race de add(), ver comentario no
+        __init__."""
+        with self._lock:
+            return list(self.entries)
 
     def search(self, query: str = "", filter_key: str = FILTER_ALL) -> Iterable[HistoryEntry]:
         allowed = FILTER_CATEGORIES.get(filter_key)
         q = (query or "").strip().lower()
-        for e in self.entries:
+        with self._lock:
+            snapshot = list(self.entries)
+        for e in snapshot:
             if allowed is not None and e.category not in allowed:
                 continue
             if q and q not in e.original.lower() and q not in (e.translated or "").lower():
@@ -81,8 +102,10 @@ class HistoryStore:
             yield e
 
     def export_txt(self, path: str):
+        with self._lock:
+            snapshot = list(self.entries)
         with open(path, "w", encoding="utf-8") as f:
-            for e in self.entries:
+            for e in snapshot:
                 if e.category == CATEGORY_RECEIVED:
                     lang_label = f" ({e.source_language})" if e.source_language else ""
                     f.write(f"[{e.timestamp}] RECEBIDO{lang_label}: {e.original}\n")
